@@ -65,4 +65,4 @@ ea-skill/
 
 ## 状态目录
 
-`<STATE_DIR>/`：`.ea/` 优先，`.em/` 兼容回退。含 `context.md`、`approvals.md`、`records/`、`logs/`、`sessions/`、`discussion/` 等。
+`<STATE_DIR>/`：`.ea/` 。含 `context.md`、`approvals.md`、`records/`、`logs/`、`sessions/`、`discussion/` 等。
