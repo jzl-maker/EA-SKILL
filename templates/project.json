@@ -1,0 +1,23 @@
+{
+  "_comment": "EA-SKILL 项目元数据；init/si 时自动生成，rec/new/verify 时读取",
+  "type": "embedded",
+  "name": "<项目名>",
+  "created": "YYYY-MM-DD",
+  "chip": {
+    "vendor": null,
+    "model": null,
+    "flash_kb": null,
+    "ram_kb": null
+  },
+  "toolchain": {
+    "ide": "keil",
+    "uv4_path": null,
+    "project_file": null,
+    "target": null,
+    "linker_script": null,
+    "startup_file": null
+  },
+  "interface": null,
+  "protected_files": [],
+  "state_dir": ".ea"
+}

@@ -1,0 +1,5 @@
+logic2-automation>=0.1.0
+pyvisa>=1.13
+pyvisa-py>=0.6
+numpy>=1.24
+matplotlib>=3.6

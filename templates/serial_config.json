@@ -1,0 +1,18 @@
+{
+  "port": "COM5",
+  "baudrate": 921600,
+  "bytesize": 8,
+  "parity": "N",
+  "stopbits": 1,
+  "timeout": 1,
+  "timestamp": true,
+  "auto_scroll": true,
+  "end_marker": "DEBUG_TEST_END",
+  "log_file": ".ea/logs/serial_{{STEP}}_{{PROBLEM}}.log",
+  "keywords": {
+    "debug": "[DBG]",
+    "error": "[ERR]",
+    "pass": "[PASS]",
+    "fail": "[FAIL]"
+  }
+}

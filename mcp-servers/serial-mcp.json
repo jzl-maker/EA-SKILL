@@ -1,0 +1,51 @@
+{
+  "$schema": "../../../docs/PLUGIN-SPEC.md#mcp-server-配置",
+  "_comment": "EA-SKILL - serial-mcp MCP server 配置。/ea setup 读取本文件并注册到 ~/.claude/settings.json",
+  "name": "serial-mcp",
+  "version": "1.0.0",
+  "description": "串口 GUI + AI 助手（tkinter + MCP）",
+  "transport": "stdio",
+  "command": "python",
+  "args": [
+    "${PLUGIN_DIR}/tools/serial-mcp/mcp_server.py"
+  ],
+  "env": {
+    "SERIAL_CONFIG": "${PLUGIN_DIR}/tools/serial-mcp/serial_config.json",
+    "PYTHONPATH": "${PLUGIN_DIR}/tools/shared:${PYTHONPATH}"
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "serial_read",
+        "description": "读取串口日志（最近 N 字节）"
+      },
+      {
+        "name": "serial_status",
+        "description": "获取连接状态（端口/波特率/已连接）"
+      },
+      {
+        "name": "serial_send",
+        "description": "向串口发送命令"
+      },
+      {
+        "name": "serial_log_file",
+        "description": "获取已保存的日志文件路径和元信息"
+      }
+    ],
+    "resources": [
+      {
+        "uri": "serial://log",
+        "name": "Serial Log",
+        "description": "当前串口日志（实时）"
+      }
+    ]
+  },
+  "requirements": {
+    "python": ">=3.8",
+    "packages": [
+      "pyserial",
+      "mcp"
+    ]
+  },
+  "platforms": ["win32", "linux", "darwin"]
+}
