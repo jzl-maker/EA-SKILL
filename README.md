@@ -1,68 +1,94 @@
-# EA-SKILL — 嵌入式 AI 开发工具
+<div align="center">
 
-**EA-SKILL（Embedded Artificial Intelligence）**：嵌入式 + AI，对新老嵌入式工程做**新功能开发、测试、调试验证**。
+# EA-SKILL · 嵌入式 AI 开发管家
 
-定位收敛为纯嵌入式：无通用项目分支，无插件加载器，命令扁平化。
+**让 Claude Code 直接接管你的单片机** —— 编译、烧录、串口、调试、寄存器查询、示波器测量，全部一句话搞定。
 
----
+```
+输入 /ea new "给 LED 加 500ms 定时翻转"   →   自动完成 规划 → 编译 → 烧录 → 验证
+```
 
-## 核心能力
+```
+[build]  Keil MDK 编译通过 ✅   (0 errors, 0 warnings)
+[flash]  OpenOCD 烧录完成 ✅   (N32G4FR, 12.4s)
+[scope]  CHAN1: 1.00kHz 方波, Vpp 3.08V, 50% 占空比 ✅   ← 真机实测
+[svd]    RCC.CR = 0x0100XX00 → HSEON 已置位 ✅
+```
 
-| 能力 | 入口 |
+</div>
+
+## 🎯 为什么值得用
+
+| 痛点 | EA-SKILL 解决 |
+|------|----------------|
+| 编译烧录要在 Keil/OpenOCD 之间来回点 | 一句话 `/ea build flash`，AI 全程接管 |
+| 查寄存器要翻 1500 页参考手册 | `/ea svd` 免断点读值 + 位域/枚举自动解码 |
+| 调变量要打断点 halt 住 CPU，中断就停 | **OpenOCD 免断点内存监控**，运行中实时采样 |
+| 看波形要手动抓示波器再导出分析 | `/ea scope` 直接 SCPI 抓取 + 测量 + 出图 |
+| 固件超 Flash/RAM 了才知道 | `/ea size` 编译即报占用率 + 超限预警 |
+
+## ✨ 差异化亮点
+
+- 🔓 **免断点调试**：OpenOCD TCL 协议直接读内存，CPU 不 halt，中断/外设持续运行
+- 📖 **SVD 寄存器地图**：自动发现 Keil Pack SVD，derivedFrom 继承展开，免查手册
+- 🔬 **仪器直连**：Rigol 示波器（SCPI 抓取/测量）+ Saleae 逻辑分析仪 + 正点原子 DS100 CSV 解析
+- 🧱 **硬件红线保护**：禁止 AI 改启动文件/链接脚本/中断向量表，需 `/ea approve` 显式授权
+- 🛡️ **AI 行为约束**：增量修改默认给 diff，防 AI 整文件重写搞坏工程
+
+## 🚀 快速上手
+
+**安装（一句话）：** 在任意支持 skill 的大模型对话中，直接输入：
+
+> 帮我安装 https://github.com/jzl-maker/EA-SKILL.git 的 skill
+
+AI 会自动克隆仓库、安装到技能目录并初始化环境。然后接入你的工程：
+
+```
+/ea si .          # 存量项目接入 → AI 生成上下文
+/ea new "..."     # 说人话描述功能，AI 规划并开发
+```
+
+## 📦 命令总览（19 个）
+
+| 分类 | 命令 |
 |------|------|
-| 工程上下文感知 | `/ea init`（新）/ `/ea si`（存量）→ `context.md` |
-| 新功能规划 | `/ea new`（轻档 / 标准档，含嵌入式硬件对齐） |
-| 测试双产出（用例文档 + 可运行测试代码） | `/ea test unit|board` |
-| 开发 / 编译 / 烧录 / 串口 / 调试 | `/ea build flash serial debug` |
-| SVD 寄存器地图（位域/枚举 + 免断点读值） | `/ea svd` |
-| 仪器测量（逻辑分析仪 / 示波器） | `/ea la scope` |
-| 固件资源分析 / Map 解析 | `/ea size map` |
-| 验证四连（编译→烧录→J-Link 运行验证→串口） | `/ea verify` |
-| 修改记录 + 上下文增量学习 | `/ea record` |
-| 状态查看 / 恢复 | `/ea stat rec` |
-| 环境初始化 | `/ea setup` |
+| 环境 / 项目 | `/ea setup` `/ea init` `/ea si` `/ea rec` |
+| 开发 / 测试 | `/ea new` `/ea test` |
+| 构建 / 烧录 | `/ea build` `/ea flash` |
+| 调试 / 寄存器 | `/ea debug` `/ea svd` |
+| 仪器 | `/ea la`（逻辑分析仪）`/ea scope`（示波器） |
+| 资源分析 | `/ea size`（Flash/RAM/栈）`/ea map`（.map 解析） |
+| 验证 / 记录 | `/ea verify` `/ea record` `/ea stat` `/ea help` |
 
-## 红线规则
+## ✅ 真机验证
 
-- ❌ 禁止 AI 改保护区文件：`startup_*.s`、中断向量表、`*.sct`/`*.ld`/`*.icf`、`system_*.c` —— 必须用户显式 `/ea approve`
-- ❌ 禁止整文件重写；默认**增量修改**，所有修改给出 diff
-- ❌ 禁止 `git push` / 公开发布
-- ⚠️ Keil 源文件 GB2312，禁止用 UTF-8 编辑器改中文
+| 能力 | 硬件 | 状态 |
+|------|------|------|
+| 烧录 | ST-Link / DAP | ✅ |
+| 波形抓取/测量 | Rigol DS1074Z | ✅ |
+| CSV 解析 | 正点原子 DS100 | ✅ |
+| SVD 寄存器地图 | N32G4FR | ✅ |
+| OpenOCD 免断点 | ST-Link/DAP | ⏳ 待实机 |
 
-## 开发闭环
+## 🔧 系统要求
 
-```
-感知(si/init→context) → 规划(new) → 测试(test) → 开发(build/debug)
-→ 验证(verify: 编译→烧录→J-Link→串口+保护区审计) → 记录(record) → 迭代
-```
+Windows 10/11 + Claude Code + Python 3.9+（`py`）+ Keil MDK + OpenOCD（J-Link / ST-Link 可选）
 
-## 安装
-
-```bash
-# 拷贝到 Claude skills 目录
-cp -r ea-skill ~/.claude/skills/ea-skill
-# 初始化环境（探测 UV4/OpenOCD/J-Link，注册到 CLAUDE.md）
-/ea setup
-```
-
-## 目录结构
+## 🧱 目录结构
 
 ```
 ea-skill/
-├── SKILL.md              # 入口：19 命令表 + 红线 + 状态目录
-├── commands/             # 19 个命令文档（AI 按需读取）
-├── workflows/            # 验证四连 / HVR / 新功能 / 上下文构建
-├── templates/            # context/approvals/测试/HVR 等模板
-├── tools/
-│   ├── build-keil/  flash-openocd/  serial-mcp/  serial-monitor/  jlink-debug/
-│   ├── svd/              # svd（SVD 寄存器地图：位域/枚举/免断点读值）
-│   ├── instrument/       # la（Saleae 逻辑分析仪）/ scope（Rigol 示波器）
-│   ├── resource/         # size（Flash/RAM 分析）/ map（Map 文件解析）
-│   ├── test-runner/      # test_gen.py（单测/板级用例生成）
-│   └── shared/           # tool_config / detect_tools / project_guard / register_claude_md
-└── mcp-servers/          # serial-mcp 注册配置
+├── SKILL.md          # 入口（命令表 + 红线）
+├── commands/         # 19 个命令文档（AI 按需读取，不污染上下文）
+├── workflows/        # 验证四连 / HVR / 新功能流程
+├── tools/            # build / flash / serial / debug / svd / instrument / resource ...
+└── mcp-servers/      # 串口 MCP
 ```
 
-## 状态目录
+## 📄 License
 
-`<STATE_DIR>/`：`.ea/` 。含 `context.md`、`approvals.md`、`records/`、`logs/`、`sessions/`、`discussion/` 等。
+[MIT](LICENSE) © 2026 jzl-maker
+
+---
+
+**Star 一下 ⭐，让嵌入式开发更 AI。**
