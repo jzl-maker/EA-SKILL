@@ -37,7 +37,7 @@
 
 ## 🚀 快速上手
 
-**安装（一句话）：** 在任意支持 skill 的大模型对话中，直接输入：
+**安装（一句话）：** 在 Claude Code 或 Cline 等支持 Agent Skills 的客户端对话中，直接输入：
 
 > 帮我安装 https://github.com/jzl-maker/EA-SKILL.git 的 skill
 
@@ -47,6 +47,24 @@ AI 会自动克隆仓库、安装到技能目录并初始化环境。然后接�
 /ea si .          # 存量项目接入 → AI 生成上下文
 /ea new "..."     # 说人话描述功能，AI 规划并开发
 ```
+
+## 🔌 大模型适配
+
+skill 的加载机制由**宿主客户端**提供，与模型本身解耦——DeepSeek 及任何 Anthropic 兼容端点的模型都能直接使用 EA-SKILL。
+
+| 模型 × 客户端 | 支持 | 说明 |
+|---------------|------|------|
+| Claude × Claude Code | ✅ 开箱即用 | 原生 skill 机制 |
+| **DeepSeek × Claude Code** | ✅ | Claude Code 设置 `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`，`/ea setup` 全流程不变 |
+| DeepSeek × Cline | ✅ | Cline 配 DeepSeek 端点 + 安装到 `.claude/skills`，setup 微调（见下）|
+| 其他 Anthropic 兼容模型 × agent 客户端（Gemini CLI / Cursor）| ✅ | 需客户端支持 Agent Skills，setup 微调 |
+| 纯聊天客户端（Copilot Chat / Chatbox / 网页版）| ❌ | 无「读文档 → 执行命令」的 agent 工具机制 |
+
+> ✅ 已用 DeepSeek（deepseek-v4）真机跑通编译 / 烧录 / 示波器 / SVD 全流程。
+
+**换客户端时 setup 微调**（skill 本体无需改动）：
+- **权限**：跳过 `~/.claude/settings.json` 那步（Cline 等会自动弹权限确认），或换成该客户端的权限格式
+- **触发器**：改跑 `py register_claude_md.py --target <该客户端记忆文件>`（如 `.cursor/rules` / `AGENTS.md`），或手动写等效规则
 
 ## 📦 命令总览（19 个）
 
