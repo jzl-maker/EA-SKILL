@@ -38,12 +38,13 @@
 ## 🚀 快速上手
 
 **安装（一句话）：** 在 Claude Code 或 Cline 等支持 Agent Skills 的客户端对话中，直接输入：
-
-> 帮我安装 https://github.com/jzl-maker/EA-SKILL.git 的 skill
-
+```
+帮我安装 https://github.com/jzl-maker/EA-SKILL.git 的 skill
+```
 AI 会自动克隆仓库、安装到技能目录并初始化环境。然后接入你的工程：
 
 ```
+/ea setup        # 环境/工具初始化（权限、工具路径、CLAUDE.md 触发器）
 /ea si .          # 存量项目接入 → AI 生成上下文
 /ea new "..."     # 说人话描述功能，AI 规划并开发
 ```
