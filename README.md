@@ -2,7 +2,7 @@
 
 **EA-SKILL（Embedded Artificial Intelligence）**：嵌入式 + AI，对新老嵌入式工程做**新功能开发、测试、调试验证**。
 
-定位收敛为纯嵌入式：无通用项目分支，无插件加载器，命令扁平化。从 EM-SKILL 改造而来，`/em xxx` → `/ea xxx`。
+定位收敛为纯嵌入式：无通用项目分支，无插件加载器，命令扁平化。
 
 ---
 
@@ -65,4 +65,4 @@ ea-skill/
 
 ## 状态目录
 
-`<STATE_DIR>/`：`.ea/` 优先，`.em/` 兼容回退。含 `context.md`、`approvals.md`、`records/`、`logs/`、`sessions/`、`discussion/` 等。
+`<STATE_DIR>/`：`.ea/` 。含 `context.md`、`approvals.md`、`records/`、`logs/`、`sessions/`、`discussion/` 等。
