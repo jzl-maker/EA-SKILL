@@ -35,7 +35,7 @@
   build            编译（Keil UV4）
   flash            烧录（OpenOCD）
   serial           串口监控（CLI/MCP）
-  debug            调试（J-Link RTT/断点/内存/寄存器；OpenOCD ST-Link/DAP 免断点监控）
+  debug            调试（J-Link RTT 取证/断点/内存/寄存器/复位放行；OpenOCD 免停机监控）
   svd              SVD 寄存器地图（外设 / 位域 / 枚举 + 免断点读值）
   la               Saleae 逻辑分析仪（抓取 / 协议解码）
   scope            Rigol 示波器（波形抓取 / 测量）

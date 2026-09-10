@@ -45,7 +45,7 @@ version: 1.1.0
 | `/ea build` | Keil 编译 | [build.md](commands/build.md) |
 | `/ea flash` | OpenOCD 烧录 | [flash.md](commands/flash.md) |
 | `/ea serial` | 串口监控（CLI/MCP）| [serial.md](commands/serial.md) |
-| `/ea debug` | 调试（J-Link RTT/断点/内存/寄存器；OpenOCD ST-Link/DAP 免断点监控）| [debug.md](commands/debug.md) |
+| `/ea debug` | 调试（J-Link RTT 取证/断点/内存/寄存器/复位放行；OpenOCD ST-Link/DAP 免停机监控）| [debug.md](commands/debug.md) |
 | `/ea svd` | SVD 寄存器地图（外设/位域/枚举 + 免断点读值）| [svd.md](commands/svd.md) |
 | `/ea la` | Saleae 逻辑分析仪（抓取/协议解码）| [la.md](commands/la.md) |
 | `/ea scope` | Rigol 示波器（波形抓取/测量）| [scope.md](commands/scope.md) |

@@ -43,7 +43,7 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 | `/ea build` | Keil 编译 |
 | `/ea flash` | OpenOCD 烧录 |
 | `/ea serial` | 串口监控（CLI/MCP） |
-| `/ea debug` | 调试（J-Link RTT/断点/内存/寄存器；OpenOCD ST-Link/DAP 免断点监控） |
+| `/ea debug` | 调试（J-Link RTT 取证/断点/内存/寄存器/复位放行；OpenOCD 免停机监控） |
 | `/ea svd` | SVD 寄存器地图（外设/位域/枚举 + 免断点读值） |
 | `/ea la` | Saleae 逻辑分析仪（抓取/协议解码） |
 | `/ea scope` | 示波器（Rigol SCPI 抓取/测量；正点原子 DS100 CSV 解析） |
@@ -71,9 +71,12 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 /ea flash                                  # OpenOCD 烧录
 /ea serial --log .em/logs/uart.log         # 串口监控（另开终端抓日志）
 
-# 3. 调试（代码跑哪了 / 变量对不对）
-/ea debug --rtt start                      # RTT 日志
-/ea debug --mem _TimeCount_10ms --watch 5  # 变量持续采样
+# 3. 调试（代码跑哪了 / 变量对不对 / 日志说了什么）
+/ea debug --rtt snapshot                   # RTT 取证：直读 RAM，含已发生的历史日志
+/ea debug --reset-run                      # 复位+放行（配合人工按压测试）
+/ea debug --rtt snapshot --duration 420 --interval 5   # 测试过程中反复采样
+/ea debug --mem _TimeCount_10ms --no-halt --watch 5    # 变量采样且不打断目标
+/ea debug --bp Display_BootDoraemon --run-ms 2000      # 断点定位
 /ea svd --chip N32G4FR --read RCC CR       # 免断点读寄存器 + 位域解码
 /ea size --project .                       # Flash/RAM 用量 + 超限预警
 
@@ -90,6 +93,7 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 | `/ea scope` CSV 解析 | 正点原子 DS100 | ✅ 已验证（自动提取采样率/探头倍率） |
 | `/ea svd` 寄存器地图 | N32G4FR（Keil Pack SVD） | ✅ 已验证（derivedFrom 继承/位域/枚举） |
 | `/ea debug` OpenOCD 免断点 | 待 ST-Link/DAP 实机 | ⏳ 待验证 |
+| `/ea debug --rtt snapshot` | N32G4FR + J-Link | ⏳ 方法已实机验证（savebin 直读）；工具封装待实机复跑 |
 
 ## 常见问题
 

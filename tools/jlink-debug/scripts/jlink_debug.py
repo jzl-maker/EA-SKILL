@@ -1,19 +1,25 @@
 #!/usr/bin/env python
-"""通用嵌入式调试工具（RTT 日志 + 断点定位 + 内存监视 + 寄存器）。
+"""通用嵌入式调试工具（RTT 取证 + 断点定位 + 内存监视 + 寄存器 + 复位放行）。
 
 为 `jlink-debug` skill 提供可重复调用的执行入口，支持：
 
-- `--rtt`         RTT 日志抓取（JLinkRTTLogger，channel 0）
-- `--bp`          断点定位「代码跑哪了」（.map 符号 → JLink Commander SetBP → go → halt → PC/regs）
-- `--mem`         监视内存变量（mem32/mem8，按符号名或地址；--monitor 无停机采样）
+- `--rtt snapshot` RTT **取证**：savebin 直读 RAM 控制块+环形缓冲，拿回含**历史**的日志
+- `--rtt start/stop/show`  RTT 实时日志（JLinkRTTLogger，只能抓 attach 之后的新数据）
+- `--bp`          断点定位「代码跑哪了」（.map 符号 → SetBP → go → halt → PC/regs）
+- `--mem`         内存变量（mem32/mem8；`--no-halt` 走 savebin 后台读，不打断目标）
 - `--regs`        读 CPU 寄存器（PC/SP/LR/…）
+- `--reset-run`   复位并放行目标（`r`+`g`），配合人工交互测试
 - `--gdb`         源码级调试（可选：检测 arm-none-eabi-gdb + JLinkGDBServerCL）
 
 双后端：
-- `--backend jlink`（默认）：J-Link Commander 脚本（JLinkRTTLogger/SetBP/halt+mem）
+- `--backend jlink`（默认）：J-Link Commander 脚本
 - `--backend openocd`：OpenOCD TCL 端口（ST-Link/CMSIS-DAP/J-Link 通用）。
   --mem/--regs 走 TCL mdw/reg 命令，**运行中读取不 halt CPU**（无停机实时监控）。
-  --bp/--rtt/--gdb 在 OpenOCD 后端暂不支持（用 --backend jlink）。
+  --bp/--rtt/--gdb/--reset-run 在 OpenOCD 后端不支持（用 --backend jlink）。
+
+非侵入能力说明：JLink Commander 的 `connect`（`-AutoConnect 1`）既不复位也不 halt；
+`savebin` 走 AHB-AP 后台访问，目标全速运行时亦可读写 RAM。`--rtt snapshot` 与
+`--mem --no-halt` 即建立在此之上，是「目标正在跑人工测试时取证据」的唯一可靠通道。
 
 零第三方依赖：只调用 J-Link / OpenOCD 可执行文件。
 """
@@ -27,6 +33,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -63,6 +70,24 @@ DEFAULT_SPEED = 4000
 DEFAULT_RTT_CHANNEL = 0
 DEFAULT_RUN_MS = 2000
 RTT_PID_FILE = Path(os.environ.get("TEMP", ".")) / "ea_skill_rtt.pid"
+
+# JLink Commander 输出捕获上限。connect 失败时 JLink 会退回交互式提示并狂刷字符，
+# 实测产生过 189MB 输出；成功输出仅数十 KB，故截断头部足够覆盖结果。
+MAX_CAPTURE_BYTES = 8 << 20
+# RTT 控制块探测长度：acID[16] + NumUp(4) + NumDown(4) + aUp[0](24) = 48，取 64 留余量。
+# 不按结构体全量读（aUp/aDown 数量随编译期配置变），避免越界到 RAM 边界外。
+RTT_CB_PROBE = 0x40
+RTT_CB_ID = b"SEGGER RTT"
+# SEGGER_RTT_CB 中 aUp[0] 的字段偏移（相对控制块起始）
+RTT_AUP_OFFSET = 24
+# 会独占 J-Link 的进程：连不上目标时按此排查，避免误判成硬件问题
+JLINK_OCCUPYING_IMAGES = (
+    "JLinkRTTLogger.exe",
+    "JLinkGDBServerCL.exe",
+    "JLink.exe",
+    "UV4.exe",
+)
+SAVEBIN_TIMEOUT = 40
 
 # OpenOCD 后端
 DEFAULT_OCD_PORT = 6666
@@ -403,27 +428,84 @@ def run_commander(
     jlink_exe: str,
     script: str,
     timeout: int = 60,
+    device: str = DEFAULT_DEVICE,
+    interface: str = DEFAULT_INTERFACE,
+    speed: int = DEFAULT_SPEED,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute JLink Commander script file.
+    """执行 JLink Commander 脚本文件，返回 CompletedProcess（stdout 为已解码文本）。
 
-    JLink older versions (< V7.60) do NOT support `-CommanderScript -` (stdin);
-    must write a temp .jlink script file and pass its path.
+    JLink < V7.60 不支持 `-CommanderScript -`（stdin），故仍写临时脚本文件。
+
+    加固点（旧实现用 `capture_output=True` 无 stdin 重定向，实测刷到 189MB 并
+    全部缓进内存）：
+
+    1. `stdin=DEVNULL` —— `connect` 失败时 Commander 会退回交互式提示并持续向
+       stdout 吐字符；stdin 若继承父进程管道则永远读不到 EOF，刷屏不止。
+    2. 命令行显式带 `-Device/-If/-Speed/-AutoConnect 1/-ExitOnError 1` —— 脚本内
+       的 `device/si/speed/connect` 保留（冗余但无害），实测带命令行参数才稳定。
+    3. stdout 落临时文件再截断读取，超大输出不进内存。
+    4. 显式 `encoding="utf-8"` —— 否则按 locale(cp936) 解码，非 ASCII 抛
+       UnicodeDecodeError。
     """
     fd, tmp_path = tempfile.mkstemp(suffix=".jlink", prefix="ea_skill_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(script)
-        return subprocess.run(
-            [jlink_exe, "-CommanderScript", tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        cmd = [
+            jlink_exe,
+            "-Device", device,
+            "-If", interface,
+            "-Speed", str(speed),
+            "-AutoConnect", "1",
+            "-ExitOnError", "1",
+            "-CommanderScript", tmp_path,
+        ]
+        with tempfile.TemporaryFile() as sink:
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+                cwd=cwd,
+            )
+            sink.seek(0)
+            raw = sink.read(MAX_CAPTURE_BYTES + 1)
+        truncated = len(raw) > MAX_CAPTURE_BYTES
+        if truncated:
+            raw = raw[:MAX_CAPTURE_BYTES]
+        out = raw.decode("utf-8", errors="replace")
+        if truncated:
+            out += (f"\n[ea-skill] ⚠️ JLink 输出超过 {MAX_CAPTURE_BYTES >> 20}MB 已截断"
+                    "（通常意味着 connect 失败后退回了交互式提示）")
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, "")
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def diagnose_connect_failure(output: str) -> None:
+    """连接失败时排查「J-Link 被占用」，避免误判为硬件问题。
+
+    残留的 RTTLogger / GDBServer / Keil 会独占 J-Link，此时任何 --bp/--mem/--regs
+    都报「无法连接目标」，与探针没插、芯片没供电的现象完全一样。
+    """
+    hit = [img for img in JLINK_OCCUPYING_IMAGES if list_pids(img)]
+    print("🔎 连接失败排查：")
+    if hit:
+        print(f"   ⚠️ 检测到可能独占 J-Link 的进程：{', '.join(hit)}")
+        for img in hit:
+            pids = list_pids(img)
+            print(f"      {img}  PID {', '.join(map(str, pids))}")
+        print("      先关掉上面这些（或 --rtt stop）再重试")
+    else:
+        print("   ✅ 无占用进程 → 检查 USB 连接、芯片供电、SWD 接线")
+    if "interactive" in output.lower() or output.count("\n") > 2000:
+        print("   ⚠️ 输出异常长，JLink 可能已退回交互式提示（脚本中途报错）")
+    print(f"   原始输出尾部：\n{output[-600:]}")
 
 def parse_regs(output: str) -> dict[str, int]:
     """解析 JLink `regs` 输出（R0-R15, xPSR, PRIMASK, FPS*）。
@@ -481,15 +563,128 @@ def parse_mem8(output: str) -> dict[int, int]:
     return values
 
 # ---------------------------------------------------------------------------
-# RTT 日志抓取
+# 进程占用排查（J-Link 被残留 logger/GDBServer/Keil 独占时的误判防护）
 # ---------------------------------------------------------------------------
 
-def rtt_start(device: str, interface: str, speed: int, channel: int, log_file: str | Path) -> int:
-    """后台启动 JLinkRTTLogger，返回 PID。"""
+def list_pids(image_name: str) -> list[int]:
+    """按镜像名列出进程 PID（Windows tasklist；POSIX pgrep 兜底）。"""
+    if os.name == "nt":
+        try:
+            res = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10,
+            )
+        except Exception:
+            return []
+        pids = []
+        for line in res.stdout.splitlines():
+            m = re.match(r'"([^"]+)","(\d+)"', line.strip())
+            if m and m.group(1).lower() == image_name.lower():
+                pids.append(int(m.group(2)))
+        return pids
+    try:
+        res = subprocess.run(["pgrep", "-x", image_name],
+                             capture_output=True, text=True, timeout=10)
+        return [int(x) for x in res.stdout.split() if x.strip().isdigit()]
+    except Exception:
+        return []
+
+def kill_pid(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, text=True, timeout=10)
+        else:
+            os.kill(pid, 9)
+        return True
+    except Exception:
+        return False
+
+# ---------------------------------------------------------------------------
+# savebin 非侵入读 RAM（RTT 取证 / --mem --no-halt 的共同底座）
+# ---------------------------------------------------------------------------
+
+def _run_savebin(
+    jlink_exe: str,
+    specs: list[tuple[str, int, int]],
+    device: str,
+    interface: str,
+    speed: int,
+    timeout: int = SAVEBIN_TIMEOUT,
+) -> dict[str, bytes]:
+    """批量 savebin 读 RAM，返回 {文件名: 内容}（读取失败的文件不出现）。
+
+    **非侵入**：`savebin` 走 AHB-AP 后台访问，不 halt CPU、不复位。配合
+    `-AutoConnect 1`（`connect` 既不复位也不 halt，只打印 `CPU is not halted !`），
+    可在目标**全速运行时**反复读取 —— 这是 RTT 拿历史日志与实时采样能成立的根据。
+
+    specs 里的地址/长度经命令行传给 savebin；脚本只含 savebin 行 + `qc`，
+    连接由命令行 `-AutoConnect 1` 完成。
+    """
+    tmpdir = Path(tempfile.mkdtemp(prefix="ea_rtt_"))
+    try:
+        if " " in str(tmpdir):
+            print(f"⚠️ 临时目录含空格，savebin 可能写入失败: {tmpdir}")
+        lines = [f"savebin {tmpdir / name} 0x{addr:08X} 0x{size:X}"
+                 for name, addr, size in specs]
+        try:
+            run_commander(jlink_exe, "\n".join(lines) + "\nqc\n", timeout=timeout,
+                          device=device, interface=interface, speed=speed)
+        except subprocess.TimeoutExpired:
+            return {}
+        got: dict[str, bytes] = {}
+        for name, _addr, size in specs:
+            p = tmpdir / name
+            try:
+                if p.exists() and p.stat().st_size == size:
+                    got[name] = p.read_bytes()
+            except OSError:
+                continue
+        return got
+    except OSError:
+        return {}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+def savebin_read(
+    jlink_exe: str,
+    addr: int,
+    size: int,
+    device: str = DEFAULT_DEVICE,
+    interface: str = DEFAULT_INTERFACE,
+    speed: int = DEFAULT_SPEED,
+) -> bytes | None:
+    """非侵入读取一段 RAM（不 halt CPU）。失败返回 None。"""
+    return _run_savebin(jlink_exe, [("read.bin", addr, size)],
+                        device, interface, speed).get("read.bin")
+
+# ---------------------------------------------------------------------------
+# RTT 日志抓取（JLinkRTTLogger）
+# ---------------------------------------------------------------------------
+
+def rtt_start(device: str, interface: str, speed: int, channel: int,
+              log_file: str | Path, force: bool = False) -> int:
+    """后台启动 JLinkRTTLogger，返回 PID。
+
+    启动前检查是否已有 logger 在跑：残留 logger 会独占 J-Link，导致后续
+    `--bp/--mem/--regs` 全部报「无法连接目标」而被误判成硬件故障。
+    """
     peers = find_peers()
     if not peers["rtt_logger"]:
         print("❌ 未找到 JLinkRTTLogger.exe（J-Link 安装目录）")
         return 1
+
+    existing = [p for p in list_pids("JLinkRTTLogger.exe")]
+    if existing:
+        print(f"⚠️ 已有 JLinkRTTLogger 在运行 (PID {', '.join(map(str, existing))})")
+        print("   它会独占 J-Link → 之后 --bp/--mem/--regs 都会报「无法连接目标」")
+        if not force:
+            print("   先 `--rtt stop` 停掉，或加 --force 强制清理")
+            return 1
+        for pid in existing:
+            kill_pid(pid)
+        print(f"   已强制清理 {len(existing)} 个残留 logger")
 
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -507,49 +702,289 @@ def rtt_start(device: str, interface: str, speed: int, channel: int, log_file: s
     RTT_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     print(f"🟢 RTT Logger 已启动 (PID {proc.pid}) → {log_path}")
     print(f"   通道 {channel} | {device} {interface}@{speed}")
-    print("   设备运行时请触发复位，日志将写入文件。")
+    print("   ⚠️ RTTLogger 只抓 attach 之后的新数据，拿不到已发生的历史日志")
+    print("      → 要历史/要取证请用 `--rtt snapshot`；本方式先 start 再复位才有效")
     return 0
 
 def rtt_stop() -> int:
-    """停止已启动的 JLinkRTTLogger。"""
-    if not RTT_PID_FILE.exists():
-        print("⚠️ 没有正在运行的 RTT Logger（未记录 PID）")
-        return 1
-    pid = int(RTT_PID_FILE.read_text(encoding="utf-8").strip())
-    try:
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                       capture_output=True, text=True, timeout=10)
-        print(f"🛑 RTT Logger 已停止 (PID {pid})")
-    except Exception as exc:  # pragma: no cover
-        print(f"⚠️ 停止失败: {exc}")
-        return 1
-    finally:
+    """停止 JLinkRTTLogger：优先 PID 文件，兜底按镜像名清理残留。"""
+    pids: list[int] = []
+    if RTT_PID_FILE.exists():
         try:
-            RTT_PID_FILE.unlink()
-        except OSError:
-            pass
+            pids = [int(RTT_PID_FILE.read_text(encoding="utf-8").strip())]
+        except (OSError, ValueError):
+            pids = []
+
+    # 兜底：PID 文件丢失 / 用户手动起过 logger 时会漏杀，残留会锁死 J-Link
+    leftovers = [p for p in list_pids("JLinkRTTLogger.exe") if p not in pids]
+    if not pids and not leftovers:
+        print("⚠️ 没有正在运行的 RTT Logger")
+        return 1
+
+    stopped = [p for p in pids + leftovers if kill_pid(p)]
+    try:
+        RTT_PID_FILE.unlink()
+    except OSError:
+        pass
+    if leftovers:
+        print(f"🛑 RTT Logger 已停止 (PID {', '.join(map(str, stopped))})"
+              f"，其中 {len(leftovers)} 个为按进程名兜底清理的残留")
+    else:
+        print(f"🛑 RTT Logger 已停止 (PID {', '.join(map(str, stopped))})")
     return 0
 
-def rtt_show(log_file: str | Path, tail: int | None = None) -> list[str]:
+def _decode_log(raw: bytes, encoding: str) -> str:
+    """解码 RTT 日志。`auto` = 先严格试 UTF-8，失败回落 GBK。
+
+    Keil 工程的 RTT 输出通常是 GBK/ASCII，按 UTF-8 强解会把中文全变成 `�`；
+    而现代工程/工具链输出多为 UTF-8，故先试 UTF-8 再回落，两边都不误伤。
+    """
+    if encoding and encoding != "auto":
+        return raw.decode(encoding, errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("gbk", errors="replace")
+
+# 超过该大小的日志在 --tail 时只读尾部，避免整文件进内存
+LOG_TAIL_READ_BYTES = 8 << 20
+
+def rtt_show(log_file: str | Path, tail: int | None = None,
+             encoding: str = "auto") -> list[str]:
     """读取 RTT 日志内容并返回行列表。"""
     log_path = Path(log_file)
     if not log_path.exists():
         print(f"❌ 日志文件不存在: {log_path}")
         return []
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        size = log_path.stat().st_size
+        with open(log_path, "rb") as fh:
+            if tail is not None and size > LOG_TAIL_READ_BYTES:
+                fh.seek(size - LOG_TAIL_READ_BYTES)
+                raw = fh.read()
+                # 从字节中途切入，首行多半残缺，丢弃
+                raw = raw.split(b"\n", 1)[-1]
+            else:
+                raw = fh.read()
+    except OSError as exc:
+        print(f"❌ 读取失败: {exc}")
+        return []
+    lines = _decode_log(raw, encoding).splitlines()
     shown = lines if tail is None else lines[-tail:]
     for line in shown:
         print(line)
     return lines
 
 # ---------------------------------------------------------------------------
-# 断点 / 内存 / 寄存器（Commander 脚本通道）
+# RTT 取证：直读 RAM 控制块 + 环形缓冲（savebin，非侵入）
 # ---------------------------------------------------------------------------
 
-def halt_then(script_body: list[str], jlink_exe: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-    body = ["halt", *script_body]
-    full = build_commander_script(DEFAULT_DEVICE, DEFAULT_INTERFACE, DEFAULT_SPEED, body)
-    return run_commander(jlink_exe, full, timeout)
+# .map 中 RTT 控制块符号名（Keil/SEGGER 常见写法）
+RTT_CB_SYMBOL_NAMES = ("_SEGGER_RTT", "SEGGER_RTT")
+
+def resolve_rtt_cb(symbols: dict[str, dict[str, Any]]) -> tuple[int, str] | None:
+    """从 .map 符号表定位 RTT 控制块地址，返回 (地址, 符号名)。"""
+    for name in RTT_CB_SYMBOL_NAMES:
+        if name in symbols:
+            return symbols[name]["addr"], name
+    low = {k.lower(): k for k in symbols}
+    for name in RTT_CB_SYMBOL_NAMES:
+        key = low.get(name.lower())
+        if key:
+            return symbols[key]["addr"], key
+    return None
+
+def extract_ring(buf: bytes, size: int, wr: int, rd: int) -> bytes:
+    """从环形缓冲取 [rd, wr) 区间，处理回绕。"""
+    if size <= 0 or len(buf) < size:
+        return b""
+    wr %= size
+    rd %= size
+    if wr == rd:
+        return b""          # 空；或恰好写满一整圈（无法区分，见 --poll 丢行提示）
+    if wr > rd:
+        return buf[rd:wr]
+    return buf[rd:] + buf[:wr]
+
+def rtt_sample(
+    jlink_exe: str,
+    cb_addr: int,
+    device: str,
+    interface: str,
+    speed: int,
+    known: tuple[int, int] | None = None,
+) -> dict[str, Any] | None:
+    """一次 savebin 抓取 RTT 状态。
+
+    `known=(pBuffer, SizeOfBuffer)` 时把控制块与缓冲**放在同一个脚本里一次读完**
+    （每次采集只启动一次 JLink，约 1-2 秒）。缓冲若已被目标重配，本轮返回的
+    `pbuf/size` 与 known 不符，调用方据此丢弃本轮并在下轮按新地址重取。
+    """
+    specs = [("cb.bin", cb_addr, RTT_CB_PROBE)]
+    if known:
+        specs.append(("up.bin", known[0], known[1]))
+    got = _run_savebin(jlink_exe, specs, device, interface, speed)
+    # 区分「本轮没请求缓冲」与「请求了但读失败」——前者应立刻重取，后者不该死循环
+    requested = known is not None
+
+    cb = got.get("cb.bin")
+    if cb is None or cb[:len(RTT_CB_ID)] != RTT_CB_ID:
+        return None                      # ID 校验：挡住 savebin 错位读出的垃圾
+    num_up, num_down = struct.unpack_from("<II", cb, 16)
+    if num_up < 1:
+        return None                      # 未分配上行缓冲（RTT 未初始化）
+    # SEGGER_RTT_CB: acID[16] + NumUp(4) + NumDown(4) = 24，aUp[0] 紧随其后
+    # aUp[0]: sName*(4) pBuffer*(4) SizeOfBuffer(4) WrOff(4) RdOff(4) Flags(4)
+    pbuf, size, wr, rd = struct.unpack_from("<IIII", cb, RTT_AUP_OFFSET + 4)
+    if pbuf == 0 or not (0 < size <= (1 << 20)):
+        return None                      # 指针/长度不合理 → 判为无效读
+    return {"pbuf": pbuf, "size": size, "wr": wr, "rd": rd, "num_up": num_up,
+            "num_down": num_down, "buf": got.get("up.bin"), "requested": requested}
+
+def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
+    """`--rtt snapshot`：直读 RAM 环形缓冲，取回**已发生**的 RTT 输出（含历史）。
+
+    与 JLinkRTTLogger / GDBServer telnet 的区别：后两者只能拿 attach 之后的新数据，
+    且高吞吐时会随机丢行；savebin 逐字节精确，是唯一可用于取证的方式。
+    """
+    jlink_exe, _ = find_jlink(args.jlink)
+    if not jlink_exe:
+        print("❌ 未找到 JLink.exe（请运行 /ea setup 注册，或用 --jlink 指定）")
+        return 1
+
+    cb_addr: int | None = None
+    source = ""
+    if args.cb_addr:
+        try:
+            cb_addr = int(args.cb_addr, 0)
+            source = "--cb-addr"
+        except ValueError:
+            print(f"❌ --cb-addr 不是合法地址: {args.cb_addr}")
+            return 1
+    else:
+        found = resolve_rtt_cb(symbols)
+        if found:
+            cb_addr, name = found
+            source = f".map 符号 {name}"
+    if cb_addr is None:
+        print("❌ 未定位到 RTT 控制块地址")
+        print("   对策 ① 确认 .map 含 _SEGGER_RTT：--list-symbols _SEGGER_RTT")
+        print("        ② 显式指定：--cb-addr 0x200014DC")
+        print("        ③ .map 不在 cwd：--map <路径>")
+        return 1
+    print(f"🎯 RTT 控制块 0x{cb_addr:08X}（来源：{source}）")
+
+    if args.dry_run:
+        print("(dry-run) savebin 采集计划：")
+        print(f"  1) savebin cb.bin 0x{cb_addr:08X} 0x{RTT_CB_PROBE:X}"
+              f"   → 校验 cb[0:10]=='SEGGER RTT'")
+        print("  2) 取 aUp[0] 的 pBuffer / SizeOfBuffer / WrOff / RdOff")
+        print("  3) savebin up.bin <pBuffer> <SizeOfBuffer>  → 按 WrOff 取 [rd, wr)")
+        print(f"  JLink: -Device {args.device} -If {args.interface} -Speed {args.speed} "
+              f"-AutoConnect 1 -ExitOnError 1   （connect 不复位、不 halt）")
+        return 0
+
+    if args.reset_run:
+        if do_reset_run(jlink_exe, args.device, args.interface, args.speed, False) != 0:
+            print("❌ 复位+放行失败，中止采集")
+            return 1
+
+    enc = args.encoding
+    duration = args.duration
+    # 每次采集要启一个 JLink 进程（约 1-2s），故轮询间隔默认比 --mem 的 0.3s 长
+    interval = args.interval if args.interval is not None else 5.0
+    poll_max = args.poll if (args.poll and args.poll > 0) else None
+    if duration is None and poll_max is None:
+        poll_max = 1                       # 缺省单次快照
+
+    print(f"📡 采集方式: savebin 直读 RAM（不 halt、不复位，对目标零干扰）")
+    if poll_max == 1:
+        print("   单次快照 → 取回环形缓冲中全部未读数据")
+    else:
+        print(f"   轮询：间隔 {interval}s"
+              + (f"，持续 {duration}s" if duration else f"，共 {poll_max} 次"))
+
+    known: tuple[int, int] | None = None
+    last_wr: int | None = None
+    chunks: list[bytes] = []
+    lost_bytes = 0
+    iteration = 0
+    deadline = (time.time() + duration) if duration else None
+
+    while True:
+        iteration += 1
+        s = rtt_sample(jlink_exe, cb_addr, args.device, args.interface,
+                       args.speed, known)
+        if s is None:
+            print(f"   [{iteration}] ⚠️ 读取无效（连接失败 / 控制块校验不过），跳过本轮")
+        elif not s["requested"]:
+            # 尚未知道缓冲地址：本轮只拿到控制块，登记后立即重取（不占用采样次数）
+            known = (s["pbuf"], s["size"])
+            print(f"   [{iteration}] ℹ️ 上行缓冲 0x{s['pbuf']:08X} "
+                  f"size={s['size']} wr={s['wr']} rd={s['rd']}")
+            continue
+        elif s["buf"] is None:
+            print(f"   [{iteration}] ⚠️ 上行缓冲读取失败（savebin 未返回，地址失效？）")
+            known = None                     # 下轮重新走一次地址定位
+        elif (s["pbuf"], s["size"]) != known:
+            print(f"   [{iteration}] ℹ️ 上行缓冲已被重配 → 0x{s['pbuf']:08X}，下轮重取")
+            known = None
+        else:
+            size, wr, buf = s["size"], s["wr"], s["buf"]
+            if last_wr is None:
+                new = extract_ring(buf, size, wr, s["rd"])       # 首轮：取全部可用历史
+                tag = f"历史 {len(new)}B"
+            else:
+                delta = (wr - last_wr) % size
+                if delta == 0:
+                    new, tag = b"", "无新增"
+                elif wr > last_wr:
+                    new = buf[last_wr:wr]
+                    tag = f"+{len(new)}B"
+                else:                                             # 环形回绕
+                    new = buf[last_wr:] + buf[:wr]
+                    tag = f"+{len(new)}B(回绕)"
+                if delta > size * 0.9:
+                    lost_bytes += delta
+                    print(f"   [{iteration}] ⚠️ 两次采样间近似写满整圈"
+                          f"({delta}/{size}B) → 可能有丢行，缩短 --interval")
+            last_wr = wr
+            if new:
+                chunks.append(new)
+                print(f"   [{iteration}] wr={wr}  {tag}")
+                if not args.json:
+                    print("      | " + _decode_log(new, enc).rstrip()
+                          .replace("\n", "\n      | "))
+
+        if deadline is not None:
+            if time.time() >= deadline:
+                break
+            time.sleep(interval)
+        else:
+            poll_max -= 1
+            if poll_max <= 0:
+                break
+            time.sleep(interval)
+
+    data = b"".join(chunks)
+    text = _decode_log(data, enc)
+    print("─" * 60)
+    print(f"✅ RTT 快照完成：{len(data)} 字节 / {len(text.splitlines())} 行"
+          + (f"（⚠️ 疑似丢失 {lost_bytes} 字节）" if lost_bytes else ""))
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(data)
+        print(f"   已写入 {out_path}")
+    if args.json:
+        print(json.dumps({"cb_addr": f"0x{cb_addr:08X}", "bytes": len(data),
+                          "lines": len(text.splitlines()), "lost": lost_bytes,
+                          "encoding": enc, "text": text}, ensure_ascii=False))
+    return 0
+
+# ---------------------------------------------------------------------------
+# 断点 / 内存 / 寄存器（Commander 脚本通道）
+# ---------------------------------------------------------------------------
 
 def do_bp(
     symbol_or_addr: str,
@@ -591,15 +1026,16 @@ def do_bp(
         return 0
 
     try:
-        result = run_commander(jlink_exe, script, timeout=run_ms // 1000 + 30)
+        result = run_commander(jlink_exe, script, timeout=run_ms // 1000 + 30,
+                               device=device)
     except subprocess.TimeoutExpired:
         print("❌ JLink Commander 执行超时")
         return 1
 
     output = result.stdout
     if result.returncode != 0 or "Cannot connect" in output or "Could not connect" in output:
-        print("❌ 连接失败，输出：")
-        print(output[-800:])
+        print("❌ 连接失败")
+        diagnose_connect_failure(output)
         return 1
 
     regs = parse_regs(output)
@@ -622,40 +1058,54 @@ def do_bp(
             print(f"   {name} = 0x{regs[name]:08X}")
     return 0
 
-def do_mem(
-    symbol_or_addr: str,
-    symbols: dict[str, dict[str, Any]],
-    backend: str,
-    jlink_exe: str,
-    ocd_port: int,
-    count: int,
-    width: int,
-    watch: int,
-    interval: float,
-    dry_run: bool,
-    json_out: bool,
-) -> int:
+def do_mem(args: Any, symbols: dict[str, dict[str, Any]], jlink_exe: str,
+           ocd_port: int) -> int:
+    """读内存变量。
+
+    jlink 后端默认 `halt → 读 → go`，会**短暂打断**目标；`--no-halt` 改走
+    `savebin` 经 AHB-AP 后台读，完全不 halt —— 用于「目标正在跑人工交互测试、
+    我要在过程中反复采样」的场景。OpenOCD 后端本就免停机。
+    """
+    symbol_or_addr, backend = args.mem, args.backend
+    count, width = args.count, args.width
+    watch = args.watch
+    interval = args.interval if args.interval is not None else 0.3
+    dry_run, json_out, no_halt = args.dry_run, args.json, args.no_halt
+
     addr = parse_address(symbol_or_addr, symbols)
     if addr is None:
         print(f"❌ 无法解析内存目标: {symbol_or_addr}")
         return 1
 
-    unit = width  # 4 => mem32, 1 => mem8
+    # --width 的取值即「每元素字节数」：4=32bit、1=8bit
+    unit = width
+    n_bytes = count * unit
     cmd = "mem32" if unit == 4 else "mem8"
+    # OpenOCD 的 mdw/mdh/mdb 按**位**选命令，必须换算，否则查表落空读不到数据
+    ocd_bits = unit * 8
     matches = resolve_symbol(symbol_or_addr, symbols) if not symbol_or_addr.lower().startswith("0x") else []
     label = f"{symbol_or_addr} @ 0x{addr:08X}" if not matches else f"{matches[0][0]} @ 0x{addr:08X}"
     if matches:
         info = matches[0][1]
         label += f"  [{info['type']} size={info['size']}]"
 
+    # 免停机路径：openocd 的 TCL mdw 本就直读；jlink 靠 --no-halt 切到 savebin
+    halt_free = backend == "openocd" or no_halt
+
     def _one_sample() -> dict[int, int]:
         if backend == "openocd":
-            # 无停机：TCL mdw/mdb 运行中直接读，不 halt
-            vals = ocd_read_mem(ocd_port, addr, count, unit)
-            if vals is None:
+            vals = ocd_read_mem(ocd_port, addr, count, ocd_bits)
+            return vals if vals is not None else {}
+        if halt_free:
+            raw = savebin_read(jlink_exe, addr, n_bytes,
+                               args.device, args.interface, args.speed)
+            if raw is None:
                 return {}
-            return vals
-        script = build_commander_script(DEFAULT_DEVICE, DEFAULT_INTERFACE, DEFAULT_SPEED, [
+            if unit == 4:
+                return {addr + i * 4: int.from_bytes(raw[i * 4:i * 4 + 4], "little")
+                        for i in range(len(raw) // 4)}
+            return {addr + i: b for i, b in enumerate(raw)}
+        script = build_commander_script(args.device, args.interface, args.speed, [
             "halt",
             f"{cmd} 0x{addr:08X} {count}",
             "go",
@@ -663,14 +1113,19 @@ def do_mem(
         if dry_run:
             print(f"\n--- 生成的 JLink 脚本 (dry-run) ---\n{script}---")
             return {}
-        res = run_commander(jlink_exe, script)
+        res = run_commander(jlink_exe, script, device=args.device,
+                            interface=args.interface, speed=args.speed)
         if unit == 4:
             return parse_mem32(res.stdout)
         return parse_mem8(res.stdout)
 
+    way = "savebin 后台读（不 halt）" if halt_free else "halt → 读 → go"
     if dry_run:
         if backend == "openocd":
             print(f"(dry-run) OpenOCD 后端: TCL {cmd} 0x{addr:08X} {count}（无停机，不 halt）")
+        elif no_halt:
+            print(f"(dry-run) JLink 后端 --no-halt: savebin 0x{addr:08X} "
+                  f"0x{n_bytes:X}（AHB-AP 后台读，不 halt 目标）")
         else:
             print(f"(dry-run) JLink 后端: halt → {cmd} → go")
         return 0
@@ -679,12 +1134,12 @@ def do_mem(
     for i in range(max(1, watch)):
         values = _one_sample()
         if not values:
-            print(f"❌ 第 {i + 1} 次读取无返回（连接失败？）")
+            print(f"❌ 第 {i + 1} 次读取无返回")
             return 1
         samples.append(values)
         if watch == 1:
             print(f"📍 内存 {label}")
-            print(f"   读取 {count} × {cmd}" + ("（无停机）" if backend == "openocd" else ""))
+            print(f"   读取 {count} × {cmd}（{way}）")
             for base in sorted(values):
                 if unit == 4:
                     print(f"     0x{base:08X} = 0x{values[base]:08X}")
@@ -703,11 +1158,39 @@ def do_mem(
 
     if json_out:
         payload: dict[str, Any] = {"backend": backend, "symbol": label, "addr": f"0x{addr:08X}",
-                                   "cmd": cmd, "samples": samples}
+                                   "cmd": cmd, "no_halt": halt_free, "samples": samples}
         print(json.dumps(payload, ensure_ascii=False))
     return 0
 
-def do_regs(backend: str, jlink_exe: str, ocd_port: int, dry_run: bool, json_out: bool) -> int:
+def do_reset_run(jlink_exe: str, device: str, interface: str, speed: int,
+                 dry_run: bool = False) -> int:
+    """`--reset-run`：复位并放行目标（`r` + `g`），之后让它自由运行。
+
+    `--bp`（跑到断点）和 `--mem`（halt→读→go）都不含「从复位开始」，而配合人工
+    交互测试时需要的恰恰是「从干净状态复位起跑，然后我不干预」。
+    """
+    script = "\n".join(["r", "g", "qc"]) + "\n"
+    if dry_run:
+        print("(dry-run) JLink 脚本: r（复位）→ g（放行）→ qc")
+        print(f"   命令行: -Device {device} -If {interface} -Speed {speed} "
+              f"-AutoConnect 1 -ExitOnError 1")
+        return 0
+    print(f"🔄 复位并放行目标（{device} {interface}@{speed}）")
+    try:
+        res = run_commander(jlink_exe, script, timeout=30,
+                            device=device, interface=interface, speed=speed)
+    except subprocess.TimeoutExpired:
+        print("❌ JLink Commander 执行超时")
+        return 1
+    if res.returncode != 0 or "Cannot connect" in res.stdout:
+        print("❌ 复位+放行失败")
+        diagnose_connect_failure(res.stdout)
+        return 1
+    print("✅ 目标已复位并放行（现在自由运行，savebin/内存读取均不打断它）")
+    return 0
+
+def do_regs(args: Any, jlink_exe: str, ocd_port: int) -> int:
+    backend, dry_run, json_out = args.backend, args.dry_run, args.json
     if backend == "openocd":
         if dry_run:
             print("(dry-run) OpenOCD 后端: TCL `reg` 读寄存器")
@@ -725,20 +1208,21 @@ def do_regs(backend: str, jlink_exe: str, ocd_port: int, dry_run: bool, json_out
                 print(f"   {name:>4} = 0x{regs[name]:08X}")
         return 0
 
-    script = build_commander_script(DEFAULT_DEVICE, DEFAULT_INTERFACE, DEFAULT_SPEED,
+    script = build_commander_script(args.device, args.interface, args.speed,
                                     ["halt", "regs", "go"])
     if dry_run:
         print(f"--- 生成的 JLink 脚本 (dry-run) ---\n{script}---")
         return 0
     try:
-        result = run_commander(jlink_exe, script)
+        result = run_commander(jlink_exe, script, device=args.device,
+                               interface=args.interface, speed=args.speed)
     except subprocess.TimeoutExpired:
         print("❌ JLink Commander 执行超时")
         return 1
     regs = parse_regs(result.stdout)
     if not regs:
-        print("❌ 无法读取寄存器（连接失败？）")
-        print(result.stdout[-600:])
+        print("❌ 无法读取寄存器")
+        diagnose_connect_failure(result.stdout)
         return 1
     if json_out:
         print(json.dumps(regs, ensure_ascii=False))
@@ -850,12 +1334,17 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 示例:
   %(prog)s --detect
-  %(prog)s --rtt start --log .em/logs/rtt.log
+  %(prog)s --rtt start --log .ea/logs/rtt.log      # 只抓新数据，须先 start 再复位
   %(prog)s --rtt stop
-  %(prog)s --rtt show --log .em/logs/rtt.log --tail 20
+  %(prog)s --rtt show --log .ea/logs/rtt.log --tail 20
+  %(prog)s --rtt snapshot                          # 直读 RAM，取回已发生的历史日志
+  %(prog)s --rtt snapshot --poll 40 --interval 5 --out .ea/logs/rtt.log
+  %(prog)s --reset-run                             # 复位+放行，让目标自由跑
+  %(prog)s --rtt snapshot --reset-run --duration 420 --interval 5
   %(prog)s --bp Display_BootDoraemon --run-ms 2000
   %(prog)s --bp 0x08001d28
   %(prog)s --mem _TimeCount_10ms --watch 3 --count 4
+  %(prog)s --mem _TimeCount_10ms --no-halt --watch 10   # 不打断正在跑的目标
   %(prog)s --regs --json
   %(prog)s --gdb --elf build/app.axf --gdb-script debug.gdb
         """,
@@ -863,8 +1352,9 @@ def build_parser() -> argparse.ArgumentParser:
     # 动作（互斥组）
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--detect", action="store_true", help="探测 J-Link 工具链")
-    actions.add_argument("--rtt", choices=["start", "stop", "show"],
-                         help="RTT 日志抓取管理")
+    actions.add_argument("--rtt", choices=["start", "stop", "show", "snapshot"],
+                         help="RTT 日志：start/stop/show=JLinkRTTLogger（只抓新数据）；"
+                              "snapshot=savebin 直读 RAM（含历史，可取证）")
     actions.add_argument("--bp", metavar="<函数名/地址>",
                          help="设断点 + 运行 → halt → 报告 PC（看代码跑哪了）")
     actions.add_argument("--mem", metavar="<变量名/地址>",
@@ -888,8 +1378,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="OpenOCD 目标配置（默认 target/stm32f4x.cfg，Cortex-M4 通用）")
     parser.add_argument("--ocd-port", type=int, default=DEFAULT_OCD_PORT,
                         help=f"OpenOCD TCL 端口（默认 {DEFAULT_OCD_PORT}）")
-    parser.add_argument("--interval", type=float, default=0.3,
-                        help="--mem --watch N 的采样间隔秒（默认 0.3）")
+    parser.add_argument("--interval", type=float, default=None,
+                        help="采样间隔秒（--mem --watch 默认 0.3；--rtt snapshot 默认 5.0）")
+    parser.add_argument("--no-halt", action="store_true",
+                        help="--mem 用 savebin 后台读，不 halt CPU（目标全速运行时采样）")
+    parser.add_argument("--reset-run", action="store_true",
+                        help="复位并放行目标（r+g）。单独使用，或配合 --rtt snapshot 先复位")
+    parser.add_argument("--cb-addr", metavar="<地址>",
+                        help="--rtt snapshot 的 RTT 控制块地址（缺省从 .map 的 _SEGGER_RTT 解析）")
+    parser.add_argument("--poll", type=int, metavar="N",
+                        help="--rtt snapshot 轮询 N 次（缺省 1 次快照；每次只取新增段）")
+    parser.add_argument("--duration", type=float, metavar="S",
+                        help="--rtt snapshot 持续采集 S 秒（与 --poll 二选一，优先本项）")
+    parser.add_argument("--encoding", default="auto",
+                        help="RTT 日志解码（默认 auto=先试 UTF-8 再回落 GBK；可指定 gbk/utf-8）")
+    parser.add_argument("--out", metavar="<文件>", help="--rtt snapshot 把原始字节写入文件")
+    parser.add_argument("--force", action="store_true",
+                        help="--rtt start 时强制清理已占用的 JLinkRTTLogger")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help=f"芯片型号（默认 {DEFAULT_DEVICE}）")
     parser.add_argument("--if", dest="interface", default=DEFAULT_INTERFACE, help=f"接口（默认 {DEFAULT_INTERFACE}）")
     parser.add_argument("--speed", type=int, default=DEFAULT_SPEED, help=f"SWD 速度 kHz（默认 {DEFAULT_SPEED}）")
@@ -916,14 +1421,18 @@ def main() -> int:
     if args.detect:
         return print_detect_report()
 
-    # 符号表加载（bp / mem / list-symbols / resolve 需要）
+    if args.no_halt and not args.mem:
+        print("⚠️ --no-halt 只对 --mem 有效，已忽略")
+
+    # 符号表加载（bp / mem / list-symbols / resolve / rtt snapshot 需要）
     symbols: dict[str, dict[str, Any]] = {}
     if args.map:
         symbols = parse_map_symbols(args.map)
         if not symbols:
             print(f"❌ 无法解析 .map: {args.map}（或无有效符号）")
             return 1
-    elif args.bp or args.mem or args.list_symbols is not None or args.resolve or args.regs:
+    elif (args.bp or args.mem or args.list_symbols is not None
+          or args.resolve or args.regs or args.rtt == "snapshot"):
         map_path = find_map_file()
         if map_path:
             symbols = parse_map_symbols(map_path)
@@ -967,12 +1476,27 @@ def main() -> int:
         return 0
 
     if args.rtt == "start":
-        return rtt_start(args.device, args.interface, args.speed, args.channel, args.log)
+        return rtt_start(args.device, args.interface, args.speed, args.channel,
+                         args.log, force=args.force)
     if args.rtt == "stop":
         return rtt_stop()
     if args.rtt == "show":
-        rtt_show(args.log, args.tail)
+        rtt_show(args.log, args.tail, args.encoding)
         return 0
+    if args.rtt == "snapshot":
+        return do_rtt_snapshot(args, symbols)
+
+    if args.reset_run and (args.bp or args.mem or args.regs or args.gdb):
+        print("⚠️ --reset-run 仅支持单独使用或配合 --rtt snapshot，本次已忽略")
+
+    # --reset-run 单独使用时就是一个纯动作（复位+放行）
+    if args.reset_run and not (args.bp or args.mem or args.regs or args.gdb):
+        jlink_exe, _ = find_jlink(args.jlink)
+        if not jlink_exe:
+            print("❌ 未找到 JLink.exe（请运行 /ea setup 注册，或用 --jlink 指定）")
+            return 1
+        return do_reset_run(jlink_exe, args.device, args.interface, args.speed,
+                            args.dry_run)
 
     # OpenOCD 后端：确保 TCL 服务在跑（--mem/--regs 需要；复用时不动用户进程）
     ocd_proc = None
@@ -985,11 +1509,9 @@ def main() -> int:
         if args.bp:
             return do_bp(args.bp, symbols, jlink_exe, args.run_ms, args.device, args.dry_run)
         if args.mem:
-            return do_mem(args.mem, symbols, args.backend, jlink_exe, args.ocd_port,
-                          args.count, args.width, args.watch, args.interval,
-                          args.dry_run, args.json)
+            return do_mem(args, symbols, jlink_exe, args.ocd_port)
         if args.regs:
-            return do_regs(args.backend, jlink_exe, args.ocd_port, args.dry_run, args.json)
+            return do_regs(args, jlink_exe, args.ocd_port)
         if args.gdb:
             return do_gdb(args.gdb_script, args.elf, args.gdb_port, args.dry_run)
     finally:
