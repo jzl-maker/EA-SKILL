@@ -20,7 +20,7 @@
 
 ```bash
 # ① 探测工具链（确认 JLink/RTTLogger/GDBServer 是否可用）
-py ~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py --detect
+py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --detect
 
 # ② 启动 RTT 日志抓取（先启动 logger，再触发复位，避免错过启动消息）
 py .../jlink_debug.py --rtt start --log .em/logs/rtt.log
@@ -145,7 +145,7 @@ _TimeCount_10ms        0x20020228   Data          size=4   ehtimer.o(.data)
 涉及修改工程 `.c`/`.h` 时：本类 Keil 工程源文件为 **GB2312（GBK）** 编码。读取用 `encoding="gbk"`，修改用字节级 Python 操作，禁止 UTF-8 编辑器直接改中文（会整文件乱码）。详见 `build.md` 的编码章节。
 
 ## 相关文件
-- `~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py` - 调试工具脚本
+- `~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py` - 调试工具脚本
 - `commands/build.md` - 编译说明
 - `commands/flash.md` - 烧录说明
 - `commands/serial.md` - 串口监控说明

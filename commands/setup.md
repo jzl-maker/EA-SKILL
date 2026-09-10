@@ -26,16 +26,16 @@
     "Edit(**/.ea/**/*.md)", "Write(**/.ea/**/*.md)",
     "Edit(**/.em/**/*.md)", "Write(**/.em/**/*.md)",
     "Bash(python:*)",
-    "Bash(python */ea-skill/tools/build-keil/*.py)",
-    "Bash(python */ea-skill/tools/flash-openocd/*.py)",
-    "Bash(python */ea-skill/tools/serial-monitor/*.py)",
-    "Bash(python */ea-skill/tools/jlink-debug/*.py)",
-    "Bash(py */ea-skill/tools/svd/*.py)",
-    "Bash(py */ea-skill/tools/instrument/*.py)",
-    "Bash(py */ea-skill/tools/doc-reader/*.py)",
-    "Bash(py */ea-skill/tools/resource/*.py)",
+    "Bash(python */EA-SKILL/tools/build-keil/*.py)",
+    "Bash(python */EA-SKILL/tools/flash-openocd/*.py)",
+    "Bash(python */EA-SKILL/tools/serial-monitor/*.py)",
+    "Bash(python */EA-SKILL/tools/jlink-debug/*.py)",
+    "Bash(py */EA-SKILL/tools/svd/*.py)",
+    "Bash(py */EA-SKILL/tools/instrument/*.py)",
+    "Bash(py */EA-SKILL/tools/doc-reader/*.py)",
+    "Bash(py */EA-SKILL/tools/resource/*.py)",
     "Bash(py -m pip install *)",
-    "Bash(python */ea-skill/tools/shared/*.py)"
+    "Bash(python */EA-SKILL/tools/shared/*.py)"
   ],
   "ask": [
     "Write(**/.ea/discussion/**/*.md)",
@@ -49,7 +49,7 @@
 
 ### 步骤 2: 探测工具路径
 ```bash
-python ea-skill/tools/shared/detect_tools.py
+python EA-SKILL/tools/shared/detect_tools.py
 ```
 找到的工具自动注册到 `%APPDATA%/ea_skill/config.json`（工作区级 `.ea_skill.json` 可覆盖）。
 
@@ -69,9 +69,9 @@ python ea-skill/tools/shared/detect_tools.py
 
 ```bash
 # 探测依赖与后端（Logic 2 软件 / 端口 / VISA 资源）
-py ~/.claude/skills/ea-skill/tools/instrument/scripts/deps_check.py --detect
+py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py --detect
 # 缺 pip 包时安装（重依赖，确认后执行）
-py ~/.claude/skills/ea-skill/tools/instrument/scripts/deps_check.py --install
+py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py --install
 ```
 
 - **pip 依赖**：`logic2-automation` / `pyvisa` / `pyvisa-py` / `numpy` / `matplotlib`
@@ -85,9 +85,9 @@ py ~/.claude/skills/ea-skill/tools/instrument/scripts/deps_check.py --install
 
 ```bash
 # 探测（DOCX/XLSX 恒为就绪）
-py ~/.claude/skills/ea-skill/tools/doc-reader/scripts/deps_check.py --detect
+py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/deps_check.py --detect
 # 装 pdfplumber（PDF 解析需要）
-py ~/.claude/skills/ea-skill/tools/doc-reader/scripts/deps_check.py --install
+py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/deps_check.py --install
 ```
 
 - **pip 依赖**：`pdfplumber`（仅 PDF）
@@ -104,7 +104,7 @@ https://github.com/xpack-dev-tools/openocd-xpack/releases
 把「编译/烧录/串口/RTT/断点/需求分析/文档识别」关键词 → 命令文档的指针表幂等写入 `~/.claude/CLAUDE.md`，实现按需动态加载：
 
 ```bash
-python ea-skill/tools/shared/register_claude_md.py
+python EA-SKILL/tools/shared/register_claude_md.py
 ```
 
 | 状态 | 行为 |

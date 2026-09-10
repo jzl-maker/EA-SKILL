@@ -25,7 +25,7 @@
 
 ### 调用方式
 ```bash
-python ~/.claude/skills/ea-skill/tools/test-runner/scripts/test_gen.py \
+python ~/.claude/skills/EA-SKILL/tools/test-runner/scripts/test_gen.py \
   unit <目标.c> --cc gcc
 # 产物: <STATE_DIR>/tests/unit/<name>.c + <name>.md
 ```

@@ -6,7 +6,7 @@
 ## 先探测环境
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py --detect
+python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py --detect
 ```
 
 确认 OpenOCD 可用且调试探针已连接。
@@ -14,7 +14,7 @@ python ~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py 
 ## 调用方式
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py \
+python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py \
   --artifact <产物路径> \
   --interface stlink \
   --target target/stm32f4x.cfg
@@ -57,6 +57,6 @@ python ~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py 
 ⚠️ **--target 必须匹配实际芯片型号**
 
 ## 相关文件
-- `~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py` - 烧录脚本
+- `~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py` - 烧录脚本
 - `commands/build.md` - 编译说明
 - `commands/serial.md` - 串口监控说明

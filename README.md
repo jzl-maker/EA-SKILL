@@ -100,7 +100,7 @@ Windows 10/11 + Claude Code + Python 3.9+（`py`）+ Keil MDK + OpenOCD（J-Link
 ## 🧱 目录结构
 
 ```
-ea-skill/
+EA-SKILL/
 ├── SKILL.md          # 入口（命令表 + 红线）
 ├── commands/         # 20 个命令文档（AI 按需读取，不污染上下文）
 ├── workflows/        # 验证四连 / HVR / 需求澄清 / 新功能流程

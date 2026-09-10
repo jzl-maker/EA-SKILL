@@ -13,7 +13,7 @@
 1. **【状态目录】** `get_state_dir()` → `<STATE_DIR>`
 2. **【改动清单】** 用 git 或基线快照计算本次改动：
    - git 项目：`git status` + `git diff --stat`
-   - 非 git 项目：`python ~/.claude/skills/ea-skill/tools/shared/project_guard.py --check` 基线比对
+   - 非 git 项目：`python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --check` 基线比对
 3. **【保护区核对】** 改动清单中是否有保护区文件：
    - 有且无 approve 记录 → 告警，列出 diff 待用户确认
    - 有且有 approve 记录 → 附上审批条目

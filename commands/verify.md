@@ -21,7 +21,7 @@
    - **J-Link 运行验证** `jlink-debug`：`--regs` 读 PC/SP 确认固件进入 main；`--rtt` 抓启动日志；必要时 `--mem` 读固件区内存
    - **串口** `serial-monitor` 抓业务启动日志
    - 结果记入 HVR 的「执行记录」区段
-5. **【保护区/增量审计】** `python ~/.claude/skills/ea-skill/tools/shared/project_guard.py --check`
+5. **【保护区/增量审计】** `python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --check`
    - 与 context.md 基线比对：保护区文件有改动且无 approve 记录 → **告警并阻塞验证**
    - 输出改动清单（供用户确认 diff）
 6. **【生成 HVR】** `<STATE_DIR>/checkpoints/HVR-<步骤>-<序号>.md`（模板 `templates/hvr-template.md`，嵌入式四连字段内嵌）

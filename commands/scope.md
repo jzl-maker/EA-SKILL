@@ -34,7 +34,7 @@ DS100 限制：**不支持 SCPI、无官方 PC 软件**，USB 仅作 U 盘（卷
 ## 调用方式
 
 ```bash
-py ~/.claude/skills/ea-skill/tools/instrument/scripts/scope.py --detect
+py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/scope.py --detect
 # ✅ 确认 pyvisa 栈 / VISA 资源 / 设备
 
 py .../scope.py --list            # 列出所有 VISA 资源
@@ -158,7 +158,7 @@ DS100 CSV 为**原始采样电压值**。脚本弹性解析：自动跳过 heade
 | DS100 频率异常 | header 无采样率且未手动指定，误用 1us/点 | `--sample-rate` 提供真实采样率，或确认 header 含 `sampling rate` |
 
 ## 相关文件
-- `~/.claude/skills/ea-skill/tools/instrument/scripts/scope.py` - 工具脚本
-- `~/.claude/skills/ea-skill/tools/instrument/scripts/deps_check.py` - 依赖探测
-- `~/.claude/skills/ea-skill/tools/instrument/requirements.txt` - 依赖清单
+- `~/.claude/skills/EA-SKILL/tools/instrument/scripts/scope.py` - 工具脚本
+- `~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py` - 依赖探测
+- `~/.claude/skills/EA-SKILL/tools/instrument/requirements.txt` - 依赖清单
 - `commands/la.md` - 逻辑分析仪命令（同类仪器）

@@ -29,7 +29,7 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 elif sys.stderr:
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-# 本脚本位于 ea-skill/tools/shared/，tool_config.py 同目录
+# 本脚本位于 EA-SKILL/tools/shared/，tool_config.py 同目录
 _THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_THIS_DIR))
 from tool_config import set_tool_path, list_tools

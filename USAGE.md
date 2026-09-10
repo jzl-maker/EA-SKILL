@@ -18,7 +18,7 @@
 
 ```bash
 # 1. 把 skill 复制到 Claude 技能目录
-cp -r ea-skill ~/.claude/skills/ea-skill
+cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 
 # 2. 运行环境初始化（注册工具路径 + 写入 CLAUDE.md 触发器）
 /ea setup
@@ -104,5 +104,5 @@ cp -r ea-skill ~/.claude/skills/ea-skill
 ## 开发
 
 - 源码在 `tools/<name>/scripts/*.py` + `commands/<cmd>.md`
-- 修改后部署：`cp -r ea-skill/. ~/.claude/skills/ea-skill/`，用 `diff -rq` 验证
+- 修改后部署：`cp -r EA-SKILL/. ~/.claude/skills/EA-SKILL/`，用 `diff -rq` 验证
 - 新增命令流程：写脚本 → 写命令文档 → 更新 `SKILL.md` 命令表 → 更新触发器模板 → 部署

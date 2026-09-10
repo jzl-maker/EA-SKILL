@@ -28,7 +28,7 @@
    - 用户选择或自定义输入
    - 外设列表（GPIO/UART/I2C/SPI/CAN/Timer/ADC...）写入 context
 4. **【工具链确认】** 确认编译/烧录/调试工具链（Keil target / OpenOCD interface / J-Link 设备名），写入 `project.json`
-5. **【基线快照】** `python ~/.claude/skills/ea-skill/tools/shared/project_guard.py --snapshot`
+5. **【基线快照】** `python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --snapshot`
    - 对保护区文件 + 当前源文件做 SHA-256 → 写入 context.md 基线区
    - 新项目此时无源文件，基线为空表，`si` 接入老工程时才真正生效
 6. **【写 state.md】** 当前步骤 S0，下一步动作：`/ea new <功能描述>`

@@ -18,7 +18,7 @@ Saleae 逻辑分析仪（Logic 8 / Logic 16 / Pro 8 / Pro 16）抓取 + 协议�
 ## 调用方式
 
 ```bash
-py ~/.claude/skills/ea-skill/tools/instrument/scripts/logic_analyzer.py --detect
+py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/logic_analyzer.py --detect
 # ✅ 确认依赖 / Logic 2 软件 / 脚本端口 10430
 
 # 无硬件自测：模拟设备抓 0.5s + I2C 解码 + 出图
@@ -92,7 +92,7 @@ py .../logic_analyzer.py --dry-run --capture --decoder "spi:CLK=0,MOSI=1,MISO=2,
 
 | 错误 | 原因 | 解决方案 |
 |------|------|----------|
-| No module named 'saleae' | 没装 logic2-automation | `py ~/.claude/skills/ea-skill/tools/instrument/scripts/deps_check.py --install` |
+| No module named 'saleae' | 没装 logic2-automation | `py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py --install` |
 | gRPC ... failed to connect | Logic 2 没跑或脚本端口没开 | 打开 Logic 2 → 设置 → 开启脚本服务器；或 `--launch` |
 | 未发现设备 | 硬件未接入 | 接 USB 后 `--list-devices`；自测用 `--simulate` |
 | 采样率超出上限 | Pro 设备多通道聚合超限 | 降低 `--sample-rate` 或减少通道 |
@@ -102,7 +102,7 @@ py .../logic_analyzer.py --dry-run --capture --decoder "spi:CLK=0,MOSI=1,MISO=2,
 | --simulate 仍需 Logic 2 | 模拟器也是 Logic 2 软件功能 | 先安装 Logic 2（`winget install Saleae.Logic2`） |
 
 ## 相关文件
-- `~/.claude/skills/ea-skill/tools/instrument/scripts/logic_analyzer.py` - 工具脚本
-- `~/.claude/skills/ea-skill/tools/instrument/scripts/deps_check.py` - 依赖探测
-- `~/.claude/skills/ea-skill/tools/instrument/requirements.txt` - 依赖清单
+- `~/.claude/skills/EA-SKILL/tools/instrument/scripts/logic_analyzer.py` - 工具脚本
+- `~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py` - 依赖探测
+- `~/.claude/skills/EA-SKILL/tools/instrument/requirements.txt` - 依赖清单
 - `commands/scope.md` - 示波器命令（同类仪器）

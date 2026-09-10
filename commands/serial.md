@@ -7,8 +7,8 @@ EA-SKILL 内置两个串口工具：
 
 | 工具 | 路径 | 用途 |
 |------|------|------|
-| serial-mcp (GUI) | `~/.claude/skills/ea-skill/tools/serial-mcp/` | 可视化串口监控，人工观察 |
-| serial-monitor (CLI) | `~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py` | AI 自动抓取日志 |
+| serial-mcp (GUI) | `~/.claude/skills/EA-SKILL/tools/serial-mcp/` | 可视化串口监控，人工观察 |
+| serial-monitor (CLI) | `~/.claude/skills/EA-SKILL/tools/serial-monitor/scripts/serial_monitor.py` | AI 自动抓取日志 |
 
 serial-mcp 用于人工观察，serial-monitor 用于 AI 自动抓取日志。
 
@@ -17,7 +17,7 @@ serial-mcp 用于人工观察，serial-monitor 用于 AI 自动抓取日志。
 ### 调用方式
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py \
+python ~/.claude/skills/EA-SKILL/tools/serial-monitor/scripts/serial_monitor.py \
   --port <COM端口> \
   --baud <波特率>
 ```
@@ -27,7 +27,7 @@ python ~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py 
 **关键：必须指定 OpenOCD 参数，否则复位会失败！**
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py \
+python ~/.claude/skills/EA-SKILL/tools/serial-monitor/scripts/serial_monitor.py \
   --port COM5 \
   --baud 115200 \
   --duration 15 \
@@ -55,7 +55,7 @@ python ~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py 
 ## 串口 GUI (MCP)
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/serial-mcp/serial_monitor.py
+python ~/.claude/skills/EA-SKILL/tools/serial-mcp/serial_monitor.py
 ```
 
 ### MCP 工具
@@ -92,7 +92,7 @@ python ~/.claude/skills/ea-skill/tools/serial-mcp/serial_monitor.py
 | 连接失败 | 串口号错误或未连接 | 检查串口连接和设备管理器 |
 
 ## 相关文件
-- `~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py` - CLI 工具
-- `~/.claude/skills/ea-skill/tools/serial-mcp/` - GUI MCP 工具
+- `~/.claude/skills/EA-SKILL/tools/serial-monitor/scripts/serial_monitor.py` - CLI 工具
+- `~/.claude/skills/EA-SKILL/tools/serial-mcp/` - GUI MCP 工具
 - `commands/build.md` - 编译说明
 - `commands/flash.md` - 烧录说明

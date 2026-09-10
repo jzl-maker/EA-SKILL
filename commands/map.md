@@ -16,7 +16,7 @@
 ## 调用方式
 
 ```bash
-py ~/.claude/skills/ea-skill/tools/resource/scripts/map_tool.py --project <工程目录>
+py ~/.claude/skills/EA-SKILL/tools/resource/scripts/map_tool.py --project <工程目录>
 # 自动扫描工程下最新 .map → 默认对象排行
 
 # 显式指定 .map
@@ -80,6 +80,6 @@ py .../map_tool.py --map build/xxx.map --stack
 | 无匹配符号 | 过滤名不存在或符号未导出 | 用更短子串重查；确认符号在 .map 里（非 static 内联被优化掉）|
 
 ## 相关文件
-- `~/.claude/skills/ea-skill/tools/resource/scripts/map_tool.py` - 工具脚本
-- `~/.claude/skills/ea-skill/tools/resource/scripts/map_parser.py` - 共享 .map 解析器
+- `~/.claude/skills/EA-SKILL/tools/resource/scripts/map_tool.py` - 工具脚本
+- `~/.claude/skills/EA-SKILL/tools/resource/scripts/map_parser.py` - 共享 .map 解析器
 - `commands/size.md` - 同源命令（/ea size，总量 + 超限预警）

@@ -21,7 +21,7 @@
 ## ① 编译（build-keil）
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/build-keil/scripts/keil_builder.py \
+python ~/.claude/skills/EA-SKILL/tools/build-keil/scripts/keil_builder.py \
   --project <工程文件路径> \
   --target <目标名>
 ```
@@ -35,8 +35,8 @@ python ~/.claude/skills/ea-skill/tools/build-keil/scripts/keil_builder.py \
 ## ② 烧录（flash-openocd）
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py --detect
-python ~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py \
+python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py --detect
+python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py \
   --artifact <产物路径> \
   --interface <stlink|jlink|cmsis-dap> \
   --target <target/xxx.cfg>
@@ -52,16 +52,16 @@ python ~/.claude/skills/ea-skill/tools/flash-openocd/scripts/openocd_flasher.py 
 
 ```bash
 # 读寄存器：确认 PC 进入用户区（main），SP 合法
-py ~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py --regs
+py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --regs
 
 # 抓 RTT 启动日志（先 start 再复位，避免错过启动消息）
-py ~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py --rtt start --log .ea/logs/rtt.log
+py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --rtt start --log .ea/logs/rtt.log
 # → 触发复位 → 
-py ~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py --rtt stop --log .ea/logs/rtt.log
-py ~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py --rtt show --log .ea/logs/rtt.log --tail 50
+py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --rtt stop --log .ea/logs/rtt.log
+py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --rtt show --log .ea/logs/rtt.log --tail 50
 
 # 必要时读固件区内存比对
-py ~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py --mem 0x08000000 --count 8
+py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --mem 0x08000000 --count 8
 ```
 
 判定：
@@ -76,7 +76,7 @@ py ~/.claude/skills/ea-skill/tools/jlink-debug/scripts/jlink_debug.py --mem 0x08
 ## ④ 串口（serial-monitor）
 
 ```bash
-python ~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py \
+python ~/.claude/skills/EA-SKILL/tools/serial-monitor/scripts/serial_monitor.py \
   --port COM5 --baud 115200 --duration 15 \
   --wait-reset --auto-reset \
   --interface <同上> \
@@ -86,7 +86,7 @@ python ~/.claude/skills/ea-skill/tools/serial-monitor/scripts/serial_monitor.py 
 ```
 
 1. 打开串口监听 → 2. OpenOCD `reset halt` 复位 → 3. MCU 重启输出完整日志 → 4. 保存到 `logs/`
-GUI（人工观察）：`python ~/.claude/skills/ea-skill/tools/serial-mcp/serial_monitor.py --project "%CD%" --step "S<N>"`
+GUI（人工观察）：`python ~/.claude/skills/EA-SKILL/tools/serial-mcp/serial_monitor.py --project "%CD%" --step "S<N>"`
 
 常见错误：不传 `--interface` → Unsupported transport；不传 `--openocd-config` → invalid command name。
 
