@@ -21,6 +21,8 @@
 
 | 痛点 | EA-SKILL 解决 |
 |------|----------------|
+| 需求说不清楚，做完才发现理解偏了 | `/ea new` 阶段 0 主动提问澄清（每题带推荐答案）→ 确认方案再动手 |
+| 需求文档 / 引脚表 / 芯片手册得手抄进对话 | `/ea doc` 直接解析 PDF / Word / Excel |
 | 编译烧录要在 Keil/OpenOCD 之间来回点 | 一句话 `/ea build flash`，AI 全程接管 |
 | 查寄存器要翻 1500 页参考手册 | `/ea svd` 免断点读值 + 位域/枚举自动解码 |
 | 调变量要打断点 halt 住 CPU，中断就停 | **OpenOCD 免断点内存监控**，运行中实时采样 |
@@ -29,6 +31,8 @@
 
 ## ✨ 差异化亮点
 
+- 🧭 **需求澄清**：描述不规范先提问坐实（9 维度扫描 + 带推荐答案的选择题），避免嵌入式返工（改引脚=改板）
+- 📄 **文档直读**：PDF / Word / Excel 转 Markdown；DOCX/XLSX 零依赖，只有 PDF 需要装包
 - 🔓 **免断点调试**：OpenOCD TCL 协议直接读内存，CPU 不 halt，中断/外设持续运行
 - 📖 **SVD 寄存器地图**：自动发现 Keil Pack SVD，derivedFrom 继承展开，免查手册
 - 🔬 **仪器直连**：Rigol 示波器（SCPI 抓取/测量）+ Saleae 逻辑分析仪 + 正点原子 DS100 CSV 解析
@@ -67,12 +71,12 @@ skill 的加载机制由**宿主客户端**提供，与模型本身解耦——D
 - **权限**：跳过 `~/.claude/settings.json` 那步（Cline 等会自动弹权限确认），或换成该客户端的权限格式
 - **触发器**：改跑 `py register_claude_md.py --target <该客户端记忆文件>`（如 `.cursor/rules` / `AGENTS.md`），或手动写等效规则
 
-## 📦 命令总览（19 个）
+## 📦 命令总览（20 个）
 
 | 分类 | 命令 |
 |------|------|
 | 环境 / 项目 | `/ea setup` `/ea init` `/ea si` `/ea rec` |
-| 开发 / 测试 | `/ea new` `/ea test` |
+| 开发 / 测试 | `/ea new`（含需求澄清）`/ea doc`（PDF/Word/Excel）`/ea test` |
 | 构建 / 烧录 | `/ea build` `/ea flash` |
 | 调试 / 寄存器 | `/ea debug` `/ea svd` |
 | 仪器 | `/ea la`（逻辑分析仪）`/ea scope`（示波器） |
@@ -98,9 +102,9 @@ Windows 10/11 + Claude Code + Python 3.9+（`py`）+ Keil MDK + OpenOCD（J-Link
 ```
 ea-skill/
 ├── SKILL.md          # 入口（命令表 + 红线）
-├── commands/         # 19 个命令文档（AI 按需读取，不污染上下文）
-├── workflows/        # 验证四连 / HVR / 新功能流程
-├── tools/            # build / flash / serial / debug / svd / instrument / resource ...
+├── commands/         # 20 个命令文档（AI 按需读取，不污染上下文）
+├── workflows/        # 验证四连 / HVR / 需求澄清 / 新功能流程
+├── tools/            # build / flash / serial / debug / svd / instrument / doc-reader / resource ...
 └── mcp-servers/      # 串口 MCP
 ```
 

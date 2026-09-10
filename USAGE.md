@@ -27,9 +27,9 @@ cp -r ea-skill ~/.claude/skills/ea-skill
 `/ea setup` 完成三件事：
 1. 追加脚本执行权限到 `~/.claude/settings.json`
 2. 探测并注册工具路径（OpenOCD / Keil UV4 / J-Link / Logic2）到 `%APPDATA%/ea_skill/config.json`
-3. 把「编译/烧录/串口/RTT/断点/SVD」等关键词 → 命令文档指针表写入 `~/.claude/CLAUDE.md`（动态按需加载，不污染常驻上下文）
+3. 把「编译/烧录/串口/RTT/断点/SVD/需求分析/文档识别」等关键词 → 命令文档指针表写入 `~/.claude/CLAUDE.md`（动态按需加载，不污染常驻上下文）
 
-## 命令表（19 个）
+## 命令表（20 个）
 
 | 命令 | 用途 |
 |------|------|
@@ -37,7 +37,8 @@ cp -r ea-skill ~/.claude/skills/ea-skill
 | `/ea init` | 新项目初始化（建 context 骨架 + 基线快照） |
 | `/ea si` | 存量项目接入（代码审计 + context + 基线快照） |
 | `/ea rec` | 恢复项目（state + context 摘要，只读） |
-| `/ea new` | 新功能开发（轻档/标准档，嵌入式硬件维度） |
+| `/ea new` | 新功能开发（需求澄清 → 轻档/标准档，嵌入式硬件维度） |
+| `/ea doc` | 文档识别（PDF / Word / Excel → Markdown / JSON） |
 | `/ea test` | 生成测试用例 + 测试代码（unit / board） |
 | `/ea build` | Keil 编译 |
 | `/ea flash` | OpenOCD 烧录 |
@@ -62,7 +63,9 @@ cp -r ea-skill ~/.claude/skills/ea-skill
 /ea si .                # 存量项目接入 → 生成 context.md + 基线快照
 
 # 2. 开发+验证
-/ea new "增加一个 500ms 定时翻转 LED"     # 规划
+/ea doc 需求规格.docx                      # 可选：先解析需求/引脚表/手册文档
+/ea new "增加一个 500ms 定时翻转 LED"      # 需求澄清 → 规划
+/ea new "加 CAN 上报" --plan-only          # 只做需求澄清+方案确认，不写代码
 /ea test unit ehtimer_tick                 # 纯函数单测
 /ea build                                  # Keil 编译
 /ea flash                                  # OpenOCD 烧录

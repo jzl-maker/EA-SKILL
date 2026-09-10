@@ -5,7 +5,7 @@
 1. 更新 Claude 权限配置（允许脚本执行 / 状态文件编辑，禁止危险操作）
 2. 探测并注册工具路径（Keil UV4 / OpenOCD / J-Link）
 3. 自动下载 OpenOCD（如果未安装）
-4. 注册全局 CLAUDE.md 触发器（编译/烧录/串口/RTT/断点 关键词 → 命令文档指针）
+4. 注册全局 CLAUDE.md 触发器（编译/烧录/串口/RTT/断点/需求分析/文档识别 关键词 → 命令文档指针）
 
 ## 触发
 ```
@@ -32,6 +32,7 @@
     "Bash(python */ea-skill/tools/jlink-debug/*.py)",
     "Bash(py */ea-skill/tools/svd/*.py)",
     "Bash(py */ea-skill/tools/instrument/*.py)",
+    "Bash(py */ea-skill/tools/doc-reader/*.py)",
     "Bash(py */ea-skill/tools/resource/*.py)",
     "Bash(py -m pip install *)",
     "Bash(python */ea-skill/tools/shared/*.py)"
@@ -78,6 +79,21 @@ py ~/.claude/skills/ea-skill/tools/instrument/scripts/deps_check.py --install
 - **Rigol 示波器**：USB 直连需 USB-TMC 驱动（Zadig 装 WinUSB），或用系统 VISA 后端
 - 无硬件自测：`/ea la --simulate`（模拟设备）、`/ea scope --parse-tmc`（合成 TMC 块）
 
+### 文档识别工具（/ea doc，可选）
+
+`doc` 解析 PDF / Word / Excel。**只有 PDF 需要 pip 包**，DOCX / XLSX 走标准库零依赖：
+
+```bash
+# 探测（DOCX/XLSX 恒为就绪）
+py ~/.claude/skills/ea-skill/tools/doc-reader/scripts/deps_check.py --detect
+# 装 pdfplumber（PDF 解析需要）
+py ~/.claude/skills/ea-skill/tools/doc-reader/scripts/deps_check.py --install
+```
+
+- **pip 依赖**：`pdfplumber`（仅 PDF）
+- **DOCX / XLSX**：标准库 `zipfile` + `xml.etree`，无需安装
+- 扫描件 PDF（无文本层）不支持，提示改用 `Read` 工具视觉识别
+
 ### 步骤 4: 自动下载 OpenOCD
 OpenOCD 是烧录必须工具，未安装时自动下载 xpack 发行版：
 ```
@@ -85,7 +101,7 @@ https://github.com/xpack-dev-tools/openocd-xpack/releases
 ```
 
 ### 步骤 5: 注册全局 CLAUDE.md 触发器
-把「编译/烧录/串口/RTT/断点」关键词 → 命令文档的指针表幂等写入 `~/.claude/CLAUDE.md`，实现按需动态加载：
+把「编译/烧录/串口/RTT/断点/需求分析/文档识别」关键词 → 命令文档的指针表幂等写入 `~/.claude/CLAUDE.md`，实现按需动态加载：
 
 ```bash
 python ea-skill/tools/shared/register_claude_md.py
@@ -114,7 +130,7 @@ python ea-skill/tools/shared/register_claude_md.py
 
 ## Python 环境检查
 
-`setup` 检查 Python 与依赖（pyserial / mcp / instrument 可选），缺失则 `pip install`。
+`setup` 检查 Python 与依赖（pyserial / mcp / instrument 可选 / doc-reader 可选），缺失则 `pip install`。
 
 ## 输出示例
 
@@ -135,6 +151,7 @@ python ea-skill/tools/shared/register_claude_md.py
 ```
 
 ## 相关文件
+- `tools/doc-reader/` — 文档识别（PDF/Word/Excel，`/ea doc` 用）
 - `tools/shared/detect_tools.py` — 工具探测
 - `tools/shared/tool_config.py` — 工具路径持久化（`%APPDATA%/ea_skill/config.json`）
 - `tools/shared/register_claude_md.py` — CLAUDE.md 触发器注册

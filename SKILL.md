@@ -1,7 +1,7 @@
 ---
 name: ea-skill
-description: 嵌入式 AI 开发管家（EA-SKILL）— 面向单片机/嵌入式工程（Keil/CubeMX/ESP-IDF/PlatformIO/Arduino）的新功能开发、单元测试、板级工装测试、编译烧录、J-Link 调试与验证。当用户要对嵌入式新老项目开发新功能、加外设、改业务逻辑、排查硬件 bug、验证固件、生成测试用例时使用；对话提到 编译/烧录/串口/RTT/断点/内存监视 等嵌入式关键词时按需加载。
-version: 1.0.0
+description: 嵌入式 AI 开发管家（EA-SKILL）— 面向单片机/嵌入式工程（Keil/CubeMX/ESP-IDF/PlatformIO/Arduino）的需求澄清与方案确认、新功能开发、单元测试、板级工装测试、编译烧录、J-Link 调试与验证。当用户要对嵌入式新老项目开发新功能、加外设、改业务逻辑、排查硬件 bug、验证固件、生成测试用例，或需求描述不清晰需要讨论确认方案、需要读取 PDF/Word/Excel 文档（芯片手册/需求规格/引脚表）时使用；对话提到 编译/烧录/串口/RTT/断点/内存监视/需求分析/文档识别 等嵌入式关键词时按需加载。
+version: 1.1.0
 ---
 
 # EA-SKILL（Embedded AI）
@@ -16,10 +16,11 @@ version: 1.0.0
 ```
 1. /ea setup          # 首次：环境/工具初始化（权限 / 工具路径 / CLAUDE.md 触发器）
 2. /ea init <名>      # 新项目    或  /ea si [路径]   存量项目接入（建 context + 基线）
-3. /ea new <功能描述>  # 新功能开发（轻 / 标准 两档）
-4. /ea test ...       # 生成测试用例 + 可运行测试代码（unit / board）
-5. /ea verify s<N>    # 验证：编译 → 烧录 → J-Link 运行验证 → 串口
-6. /ea record s<N>    # 输出修改记录（文件 + diff + 测试证据）
+3. /ea doc <文档>     # 可选：先解析需求/引脚/手册文档（PDF / Word / Excel）
+4. /ea new <功能描述>  # 新功能开发（需求澄清 → 轻 / 标准 两档）
+5. /ea test ...       # 生成测试用例 + 可运行测试代码（unit / board）
+6. /ea verify s<N>    # 验证：编译 → 烧录 → J-Link 运行验证 → 串口
+7. /ea record s<N>    # 输出修改记录（文件 + diff + 测试证据）
 ```
 
 **首次进入项目**：
@@ -30,7 +31,7 @@ version: 1.0.0
 | 存量项目（无状态目录）| `/ea si [path]` |
 | 恢复已有项目 | `/ea rec` |
 
-## 命令表（19 个）
+## 命令表（20 个）
 
 | 命令 | 用途 | 文档 |
 |------|------|------|
@@ -38,7 +39,8 @@ version: 1.0.0
 | `/ea init` | 新项目初始化（建 context 骨架 + 基线快照）| [init.md](commands/init.md) |
 | `/ea si` | 存量项目接入（代码审计 + context + 基线快照）| [si.md](commands/si.md) |
 | `/ea rec` | 恢复项目（state + context 摘要，只读）| [rec.md](commands/rec.md) |
-| `/ea new` | 新功能开发（两档分流，嵌入式硬件维度）| [new.md](commands/new.md) |
+| `/ea new` | 新功能开发（需求澄清 → 两档分流，嵌入式硬件维度）| [new.md](commands/new.md) |
+| `/ea doc` | 文档识别（PDF / Word / Excel → Markdown / JSON）| [doc.md](commands/doc.md) |
 | `/ea test` | 生成测试用例 + 测试代码：`unit` / `board` | [test.md](commands/test.md) |
 | `/ea build` | Keil 编译 | [build.md](commands/build.md) |
 | `/ea flash` | OpenOCD 烧录 | [flash.md](commands/flash.md) |
@@ -77,7 +79,8 @@ version: 1.0.0
 ├── problem-log.md     # 问题追踪
 ├── approvals.md       # 保护区改动审批日志
 ├── sessions/          # 每会话一文件
-├── discussion/        # 讨论目录（new 标准档 brainstorm/milestones）
+├── discussion/        # 讨论目录（需求澄清 requirement.md / brainstorm / milestones）
+├── docs/              # 文档解析缓存（/ea doc 输出，按内容哈希）
 ├── checkpoints/       # HVR 文件
 ├── history/           # 归档
 ├── logs/              # 串口/编译日志
@@ -98,10 +101,10 @@ def get_state_dir(root):
 
 ## 详细文档
 
-- `commands/` — 19 个命令定义
-- `workflows/` — 工作流：context-build（上下文构建）、chip-learning（芯片学习）、new-light / new-standard（两档）、verify-flow（编译→烧录→J-Link→串口）、hvr-workflow
-- `templates/` — 模板：state / context / project / hvr / approvals / 单测与板级测试
-- `tools/` — 工具：build-keil / flash-openocd / serial-mcp / serial-monitor / jlink-debug / svd / instrument（la+scope）/ resource（size+map）/ shared / test-runner
+- `commands/` — 20 个命令定义
+- `workflows/` — 工作流：context-build（上下文构建）、chip-learning（芯片学习）、req-clarify（需求澄清）、new-light / new-standard（两档）、verify-flow（编译→烧录→J-Link→串口）、hvr-workflow
+- `templates/` — 模板：state / context / project / hvr / approvals / requirement / 单测与板级测试
+- `tools/` — 工具：build-keil / flash-openocd / serial-mcp / serial-monitor / jlink-debug / svd / instrument（la+scope）/ doc-reader（pdf+docx+xlsx）/ resource（size+map）/ shared / test-runner
 - `mcp-servers/` — serial-mcp MCP server 配置
 
 查看详细：`/ea help <命令>`

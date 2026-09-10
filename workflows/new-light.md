@@ -7,7 +7,11 @@
 **最小可执行计划**：不发散、不头脑风暴，只确认目标和边界 → 直接 verify。
 
 ## 前置
-先读 `<STATE_DIR>/context.md`（工程上下文），改动遵循 SKILL.md 红线（保护区禁随意改、增量修改、改动给 diff）。
+1. 先读 `<STATE_DIR>/context.md`（工程上下文）
+2. 再读 `<STATE_DIR>/discussion/<YYYYMMDD>-<slug>/requirement.md`（阶段 0 澄清产出）——**已确认的需求直接引用，不重复分析**
+3. 改动遵循 SKILL.md 红线（保护区禁随意改、增量修改、改动给 diff）
+
+> 轻档的澄清深度通常为「快」（≤3 题），`requirement.md` 可能很短，属正常。
 
 ## 流程
 
@@ -30,6 +34,9 @@
 
 ## 一句话目标
 <10-30 字以内>
+
+## 需求来源
+<requirement.md 路径>（阶段 0 已确认，勿重复分析）
 
 ## 改动清单（≤ 5 项）
 - [ ] 文件1 - 改动摘要（涉保护区？无）
@@ -82,4 +89,6 @@
 
 ## 相关文件
 - `commands/new.md` — 入口
+- `workflows/req-clarify.md` — 阶段 0 需求澄清（上游）
+- `templates/requirement.md` — 需求产出（先读）
 - `templates/context.md` — 工程上下文（先读）

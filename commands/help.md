@@ -9,7 +9,7 @@
 ```
 
 ## 无参数时
-显示命令表（19 个）：
+显示命令表（20 个）：
 
 ```
 嵌入式 AI 开发管家 — /ea 命令
@@ -22,7 +22,12 @@
   stat [-v/steps/next]  状态查看
 
 开发流程:
-  new <描述>       新功能开发（轻档 quick-plan / 标准档 brainstorm+milestones）
+  new <描述>       新功能开发（需求澄清 → 轻档 quick-plan / 标准档 brainstorm+milestones）
+    --plan-only      只做需求澄清与方案确认，产出 requirement.md 后停下
+    --no-clarify     跳过需求澄清（需求已明确）
+    --quick/--deep   覆盖澄清深度（快 ≤3 题 / 深 9 维度全扫）
+    --doc <路径>     从文档提取需求（先跑 /ea doc）
+  doc <路径>       文档识别（PDF / Word / Excel → Markdown，--outline/--full/--json）
   test unit <文件|函数>   生成并运行纯函数 host 单测（用例 .md + 代码 .c）
   test board <功能>       生成板级工装验收用例（用例 .md + 板载测试固件/驱动脚本）
 
@@ -50,7 +55,8 @@
 /ea help setup      # 环境初始化
 /ea help init       # 新项目初始化
 /ea help si         # 存量接入
-/ea help new        # 新功能开发两档
+/ea help new        # 新功能开发（需求澄清 + 两档）
+/ea help doc        # 文档识别（PDF / Word / Excel）
 /ea help test       # 测试生成（unit / board）
 /ea help verify     # 验证流程 + 保护区审计
 /ea help debug      # 调试（J-Link / OpenOCD 双后端）

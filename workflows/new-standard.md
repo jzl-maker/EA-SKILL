@@ -12,7 +12,11 @@
 标准档内含**嵌入式硬件对齐阶段**（新外设/引脚/时序/实时性约束），保证设计可落板。
 
 ## 前置
-先读 `<STATE_DIR>/context.md`（芯片/外设/模块地图/保护区）。改动遵循 SKILL.md 红线。
+1. 先读 `<STATE_DIR>/context.md`（芯片/外设/模块地图/保护区）
+2. 再读 `<STATE_DIR>/discussion/<YYYYMMDD>-<slug>/requirement.md`（阶段 0 澄清产出）——**需求已坐实，本档不重复做需求分析**
+3. 改动遵循 SKILL.md 红线
+
+> 若 `requirement.md` 第 4 节有「未决 / 风险」项，brainstorm 时优先消化，能定则定、不能定则显式标注到 milestones。
 
 ## 流程
 
@@ -34,7 +38,8 @@
 # brainstorm: S<N>-<slug>
 
 ## 需求理解
-<1-2 段，AI 复述需求 + 关联 context 中既有模块>
+<从 requirement.md 第 5 节引入已确认需求 + 关联 context 中既有模块，不重新分析需求>
+<若 requirement.md 第 4 节有未决项，在此列出并给出本档的处理决定>
 
 ## 候选方案
 ### 方案 A: <名字>
@@ -116,5 +121,7 @@ brainstorm 时发现「这就是个 bugfix / 单文件调参」→ 降轻档（`
 
 ## 相关文件
 - `commands/new.md` — 入口
+- `workflows/req-clarify.md` — 阶段 0 需求澄清（上游）
+- `templates/requirement.md` — 已确认需求（先读）
 - `templates/context.md` — 工程上下文（硬件对齐数据源）
 - `commands/verify.md` — 验证入口

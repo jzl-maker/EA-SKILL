@@ -1,0 +1,4 @@
+# /ea doc 依赖
+#
+# 只有 PDF 需要第三方包。DOCX / XLSX 走标准库 zipfile + xml.etree 零依赖解析。
+pdfplumber>=0.11.0

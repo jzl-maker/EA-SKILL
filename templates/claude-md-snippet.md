@@ -5,6 +5,8 @@
 
 | 关键词 | 命令文档 |
 |--------|----------|
+| 需求 / 需求分析 / 方案确认 / 需求文档 / 需求不明确 | `~/.claude/skills/ea-skill/commands/new.md` |
+| PDF / Word / Excel / 文档识别 / 数据手册 / 引脚表 | `~/.claude/skills/ea-skill/commands/doc.md` |
 | 编译 / build / 构建 | `~/.claude/skills/ea-skill/commands/build.md` |
 | 烧录 / flash / 下载 / 固件 | `~/.claude/skills/ea-skill/commands/flash.md` |
 | 串口 / serial / 抓取 / 监控 | `~/.claude/skills/ea-skill/commands/serial.md` |
