@@ -2,7 +2,12 @@
 
 > 由 `/ea si`（存量）或 `/ea init`（新建）生成；`/ea record` 增量更新。
 > ⚠️ 动手改代码前必读本文件；改动遵循 SKILL.md 红线（保护区禁改 / 增量修改 / 改动给 diff）。
+>
+> 🔻 `<!-- summary:begin -->` / `<!-- summary:end -->` 之间是**轻量恢复区段**：
+> `/ea rec` 只读这一段。**标记不可删**，也不要把会无限增长的区段（基线 sha256 列表、
+> 增量学习记录）搬进标记内 —— 那会把 rec 变回全文加载。
 
+<!-- summary:begin -->
 ## 芯片
 - 型号: <如 STM32F103C8T6> / 厂商: <ST>
 - Flash: <64KB> / RAM: <20KB>
@@ -37,6 +42,8 @@
 | startup_<chip>.s | 启动/中断向量表 |
 | system_<chip>.c | 核心初始化 |
 | <project>.sct | 链接脚本 |
+
+<!-- summary:end -->
 
 ## 关键文件基线（project_guard）
 > 由 `tools/shared/project_guard.py --snapshot` 生成，`--check` 比对。

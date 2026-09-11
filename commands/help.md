@@ -52,21 +52,37 @@
 显示指定命令的详细帮助：
 
 ```
+环境/项目:
 /ea help setup      # 环境初始化
 /ea help init       # 新项目初始化
 /ea help si         # 存量接入
+/ea help rec        # 恢复项目
+/ea help stat       # 状态查看
+
+开发流程:
 /ea help new        # 新功能开发（需求澄清 + 两档）
 /ea help doc        # 文档识别（PDF / Word / Excel）
 /ea help test       # 测试生成（unit / board）
-/ea help verify     # 验证流程 + 保护区审计
+
+嵌入式工具:
+/ea help build      # 编译（Keil UV4）
+/ea help flash      # 烧录（openocd / jlink-native 双通道）
+/ea help serial     # 串口监控
 /ea help debug      # 调试（J-Link / OpenOCD 双后端）
 /ea help svd        # SVD 寄存器地图
 /ea help la         # 逻辑分析仪
 /ea help scope      # 示波器
 /ea help size       # 固件资源分析
 /ea help map        # Map 文件解析
+
+验证/记录:
+/ea help verify     # 验证流程 + 保护区审计
 /ea help record     # 修改记录
+/ea help help       # 本帮助
 ```
+
+> 清单必须覆盖全部命令 —— 上面「无参数时」列了几条，这里就得有几条。
+> 漏掉的那几条会让人以为命令不存在。
 
 ## 红线提醒
 任何命令执行中都需遵守 SKILL.md 红线：保护区文件禁随意改、老工程增量修改、所有修改给 diff、GBK 编码。

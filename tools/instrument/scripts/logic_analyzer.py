@@ -739,7 +739,7 @@ def _print_dry_run(args, specs: list[tuple[str, dict]], load: bool = False) -> N
     if args.export_raw or any(getattr(args, f) for f in DECODE_FLAGS):
         print("\n  # 之后在 digital.csv 上做纯软件分析（不经 Logic 2 解码器）：")
         print("  waveform.load_digital_csv(<export-dir>/digital.csv)")
-        print("  → 每通道素描：跳变数 / 高位占比 / 最短脉宽 / 波特率粗估")
+        print("  → 每通道素描：跳变数 / 高位占比 / 脉宽众数(位宽) / 波特率粗估")
         for kind in ("uart", "spi", "i2c"):
             for spec_text in getattr(args, f"decode_{kind}"):
                 print(f"  → waveform.decode_{kind}({spec_text!r})  # 用跳变时刻直接解字节")
@@ -790,7 +790,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--decode-uart", action="append", default=[], metavar="ch=N,baud=B",
                         help="不依赖 Logic 2 的内置 UART 解码，直接从 digital.csv 的跳变"
-                             "时刻解出精确字节。可重复；baud 给 auto 则按最短脉宽粗估。"
+                             "时刻解出精确字节。可重复；baud 给 auto 则按脉宽众数粗估。"
                              "例：'ch=7,baud=57600'、'TX=7,RX=15,baud=auto'。"
                              "自动开启 --export-raw")
     parser.add_argument("--decode-spi", action="append", default=[], metavar="clk=N,...",

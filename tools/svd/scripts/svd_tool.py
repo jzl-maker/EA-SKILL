@@ -21,6 +21,7 @@ SVD 自动发现来源：tool_config 的 uv4 路径 → Keil5/ARM/PACK/Nationste
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -308,6 +309,8 @@ def find_register(periph: SvdPeripheral, name: str) -> SvdRegister | None:
 
 
 def fuzzy_search(periphs: list[SvdPeripheral], keyword: str, limit: int = 30) -> list[str]:
+    """子串匹配（不区分大小写）。"timer" 匹配不到 "TIM1" —— 那是子串匹配的固有行为，
+    不是大小写问题。无命中时由 suggest_names() 兜底给近邻。"""
     kw = keyword.lower()
     hits: list[str] = []
     for p in periphs:
@@ -320,6 +323,26 @@ def fuzzy_search(periphs: list[SvdPeripheral], keyword: str, limit: int = 30) ->
                 if len(hits) >= limit:
                     return hits
     return hits
+
+
+def suggest_names(periphs: list[SvdPeripheral], keyword: str, limit: int = 5) -> list[str]:
+    """无命中时给最接近的名字，返回**原始大小写**的名字。
+
+    没有这个兜底，`--find timer`（SVD 里叫 TIM1）只会得到"未找到"，读起来像"这颗芯片
+    没有定时器"—— 于是 AI 转头去翻手册。给几个近邻，真实情况立刻清楚。
+
+    difflib 的相似度是**大小写敏感**的（'timer' 对 'TIM1' 相似度≈0），所以比对在
+    小写空间做，返回时再换回原名。
+    """
+    index: dict[str, str] = {}
+    for p in periphs:
+        index.setdefault(p.name.lower(), p.name)
+        for r in p.registers:
+            index.setdefault(f"{p.name}.{r.name}".lower(), f"{p.name}.{r.name}")
+    if not index:
+        return []
+    near = difflib.get_close_matches(keyword.lower(), list(index), n=limit, cutoff=0.3)
+    return [index[k] for k in near]
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +547,13 @@ def main(argv: list[str] | None = None) -> int:
         hits = fuzzy_search(periphs, args.find)
         if not hits:
             print(f"❌ 未找到含 '{args.find}' 的外设/寄存器")
+            near = suggest_names(periphs, args.find)
+            if near:
+                print("   最接近的名字：")
+                for name in near:
+                    print(f"     {name}")
+            print("   → 搜索是子串匹配（不区分大小写）：'timer' 匹配不到 'TIM1'，"
+                  "改试 'TIM' 或 'TIM1'")
             return 1
         print(f"🔍 搜索 '{args.find}'（{len(hits)} 个）：")
         for h in hits:

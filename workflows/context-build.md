@@ -10,6 +10,7 @@
 ```markdown
 # 工程上下文：<项目名>
 
+<!-- summary:begin -->
 ## 芯片
 - 型号/厂商/Flash/RAM
 - 外设列表（GPIO/UART/I2C/SPI/CAN/Timer/ADC/DAC/USB...）
@@ -42,11 +43,14 @@
 | system_<chip>.c | 核心初始化 |
 | <project>.sct | 链接脚本 |
 
+<!-- summary:end -->
+
 ## 关键文件基线（project_guard --snapshot 生成）
 - `startup_<chip>.s` sha256: <hex>
 - `app/main.c` sha256: <hex>
 
 ## 增量学习记录
+
 - [YYYY-MM-DD] 新增模块 X / 新约定 Y / 新坑 Z
 ```
 
@@ -67,10 +71,16 @@
 7. **基线快照**：`python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --snapshot` → 哈希写入 context
 8. **写 context.md** 到 `<STATE_DIR>/context.md`
 
+   ⚠️ **必须保留 `<!-- summary:begin -->` / `<!-- summary:end -->` 标记**（包住
+   芯片 / 工程与工具链 / 保护区清单）。`/ea rec` 靠它只读这一段做轻量恢复 ——
+   标记丢了，rec 就得整读整个文件（实测有工程达 78 KB ≈ 20K tokens）。
+   也**不要**把会无限增长的区段（基线 sha256、增量学习记录）搬进标记内。
+
 ## 设计原则
 - ✅ 只读分析，零修改源文件（老工程保护）
 - ✅ 基线一旦建立，后续所有改动可 diff、保护区可审计
 - ✅ 增量学习：`/ea record` 每次回写「增量学习记录」区段，context 越用越准
+- ✅ **轻量恢复**：摘要区段（summary 标记内）供 `/ea rec` 用；其余区段按需读
 
 ## 相关文件
 - `templates/context.md` — 模板

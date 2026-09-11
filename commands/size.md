@@ -62,6 +62,18 @@ py .../size_tool.py --map build/xxx.map --json
 2. **容量缺省取链接脚本 region Max**：`.sct` 里 `LOAD_REGION`/`RW_IRAM1` 的 Max 就是芯片可用量；若链接脚本人为缩小区域（如给 BootLoader 预留），Max 会小于芯片容量，此时用 `--flash-kb/--ram-kb` 覆盖成芯片真实值。
 3. **ZI-data 计入 RAM**：Total RW = RW Data + ZI Data（含 bss 未初始化段）。
 4. **GBK 编码兼容**：工程路径含中文时 .map 可能是 GBK 编码，解析器自动回退。
+5. **⚠️ Flash 口径与 Keil 面板可能差几百字节 —— 两个数都对，别当成 bug**。
+
+   | 来源 | Flash 取什么 |
+   |------|-------------|
+   | `/ea size` | `.map` 的 **`Total ROM Size` 行** |
+   | Keil 面板 / `keil_builder.py` | **Code + RO-data + RW-data 三项相加** |
+
+   实测某工程：`/ea size` = 106,104 B，Keil 三项和 = 73,680 + 32,240 + 728 = **106,648 B**，
+   差 **544 B**（= RW-data 728 与计入 ROM 的初始化量 184 之差）。
+
+   **怎么用**：同一工程内**只用一种口径**看趋势，别混着比。做超限预警时按**较大**的那个
+   口径留余量（Keil 三项和更保守）。两个数相差几百字节时**不要**去查工具 bug。
 
 ## 常见错误
 

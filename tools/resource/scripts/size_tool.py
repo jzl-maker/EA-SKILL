@@ -91,7 +91,10 @@ def do_size(args) -> int:
             and report[f"{k}_pct"] >= args.err]
     if over:
         print(f"\n  ❌ 超限预警触发: {'、'.join(over)} 使用率 ≥ {args.err}%")
-    elif report["flash_pct"] is not None and report["ram_pct"] is not None:
+        # 触发阈值按失败返回：verify / CI 里 `/ea size` 是当检查用的，超限必须能中断流程。
+        # 打印了 ❌ 却 exit 0，调用方只能去解析输出文本 —— 脚本化编排就白做了。
+        return 1
+    if report["flash_pct"] is not None and report["ram_pct"] is not None:
         print(f"\n  ✅ 均在阈值内（warn {args.warn}% / err {args.err}%）")
     return 0
 

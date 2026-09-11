@@ -33,9 +33,11 @@ py .../svd_tool.py --chip N32G4FR --reg GPIOA GPIOx_PL_CFG
 py .../svd_tool.py --chip N32G4FR --read RCC CR --backend openocd
 # → RCC.CR = 0x0100XX00，按位域展开 HSEON/HSEONRDY…
 
-# ④ 模糊搜索（记不全名字时）
-py .../svd_tool.py --chip N32G4FR --find timer
+# ④ 模糊搜索（记不全名字时）—— 子串匹配，不区分大小写
+py .../svd_tool.py --chip N32G4FR --find TIM       # → TIM1..TIM8
 py .../svd_tool.py --chip N32G4FR --find PID
+# 搜不到时会给近邻建议，例如 --find timer → 建议 TIM8/TIM7/TIM6/…（它是子串匹配，
+# 'timer' 不是 'TIM1' 的子串，所以匹配不到 —— 这不是大小写问题）
 
 # AI 解析用 JSON
 py .../svd_tool.py --chip N32G4FR --reg RCC CR --json

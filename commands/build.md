@@ -8,8 +8,13 @@
 ```bash
 python ~/.claude/skills/EA-SKILL/tools/build-keil/scripts/keil_builder.py \
   --project <工程文件> \
-  --target <目标名>
+  --target <目标名> \
+  --log <STATE_DIR>/logs/build_S<N>.log
 ```
+
+⚠️ **建议总是显式传 `--log`**：不传时日志默认写到**工程目录**下
+（`<工程目录>/<target>_build.log`），会污染仓库、被 git 看到。显式指向 `<STATE_DIR>/logs/`
+既干净，也让日志与步骤号 S\<N\> 对应得上。
 
 ## 参数来源
 
@@ -17,6 +22,7 @@ python ~/.claude/skills/EA-SKILL/tools/build-keil/scripts/keil_builder.py \
 |------|------|
 | `--project` | 扫描工作区的 .uvprojx/.uvproj 文件 |
 | `--target` | 使用工程中第一个 Target，或由用户指定 |
+| `--log` | 建议传 `<STATE_DIR>/logs/build_S<N>.log`（缺省落工程目录，见上）|
 | UV4 路径 | 自动从 tool_config 读取（由 `/ea setup` 注册） |
 
 ## 检测工程
@@ -35,12 +41,22 @@ for p in Path('.').rglob('*.uvproj'): print(p)
 
 AI 从脚本 stdout 中提取以下字段记录到 HVR：
 
-| 字段 | 作用 |
-|------|------|
-| 编译状态 | ✅ 成功 / ❌ 失败 |
-| 错误数/警告数 | `错误: N  警告: N` |
-| 固件大小 | `Flash ≈ N KB  RAM ≈ N KB` |
-| 产物路径 | `产物: file.axf (N KB)` |
+| 字段 | 作用 | 是否总出现 |
+|------|------|-----------|
+| 编译状态 | ✅ 成功 / ❌ 失败 | ✅ 总是 |
+| 错误数/警告数 | `错误: N  警告: N` | ⚠️ **有条件** |
+| 固件大小 | `Flash ≈ N KB  RAM ≈ N KB` | ⚠️ **有条件** |
+| 产物路径 | `产物: file.axf (N KB)` | ⚠️ 解析到产物才有 |
+
+⚠️ **这两个字段缺了 ≠ 解析失败，别据此判断编译异常**：
+
+- **`错误: N  警告: N` 只在至少有一个非零时打印**。0 错误 0 警告（干净的成功编译）
+  时整行不出现 —— 「没有这一行」恰恰是**最理想**的情况。
+- **`固件大小` 只在日志里出现 `Program Size:` 时才打印**。增量编译没有重新链接时，
+  UV4 不输出这一行，字段就缺席。**要拿固件大小请用 `/ea size`**（解析 .map），
+  或加 `--rebuild` 强制全量重编 —— 别用「增量编译没打印大小」推断编译有问题。
+
+后续步骤（烧录 / 验证）**不要依赖这两个字段非空**，只认编译状态与产物路径。
 
 ## 自动决策
 

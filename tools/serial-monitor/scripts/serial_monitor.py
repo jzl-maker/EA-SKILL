@@ -37,6 +37,9 @@ try:
 except ImportError:
     get_tool_path = None  # type: ignore
 
+# 探针探测判据（与 flash-openocd / jlink-debug 共用，见 tools/shared/probe.py）
+from probe import detect_probes as _shared_detect
+
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -250,35 +253,15 @@ def check_openocd() -> bool:
 
 
 def detect_available_debuggers() -> list[str]:
+    """探测已连接的调试接口。
+
+    判据见 tools/shared/probe.py —— 原先这里自带一份"错误输出含探针关键词即判已连接"
+    的错判据，会让 `--auto-reset` 自动选中一个不存在的接口。
+    """
     openocd_exec = _get_openocd_executable()
     if not openocd_exec:
         return []
-
-    detected: list[str] = []
-    seen: set[str] = set()
-    for interface in INTERFACE_PRIORITY:
-        interface_cfg = INTERFACE_CONFIGS[interface]
-        try:
-            result = subprocess.run(
-                [openocd_exec, "-f", interface_cfg, "-c", "init; exit"],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-        except Exception:
-            continue
-
-        combined = f"{result.stdout}\n{result.stderr}".lower()
-        if result.returncode == 0 or "cmsis-dap" in combined or "st-link" in combined or "j-link" in combined:
-            if interface not in seen:
-                seen.add(interface)
-                detected.append(interface)
-            continue
-
-        if "open failed" in combined or "no device found" in combined or "unable to find" in combined:
-            continue
-
-    return detected
+    return _shared_detect(openocd_exec, INTERFACE_CONFIGS, INTERFACE_PRIORITY)
 
 
 def choose_debugger_interface(explicit_interface: str | None, no_detect: bool) -> str | None:
@@ -663,6 +646,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--monitor", action="store_true", help="持续监视，直到 Ctrl+C")
     parser.add_argument("--save", help="将日志保存到文件（默认自动保存到 .ea/logs/，兼容 .em/logs/）")
     parser.add_argument("--step", help="当前验证步骤（如 S9），用于日志命名")
+    parser.add_argument("--project", help="项目名，用于日志命名（可选，与 --step 组合）")
     parser.add_argument("--timestamp", action="store_true", help="显示时间戳")
     parser.add_argument("-v", "--verbose", action="store_true", help="输出详细分析")
     parser.add_argument("--keep", action="store_true", help="保留已有缓冲区内容")

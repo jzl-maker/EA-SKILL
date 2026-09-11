@@ -14,15 +14,25 @@
 |--------|------|--------|
 | L0 默认 | `<STATE_DIR>/state.md` | 总是（≤50 行）|
 | L1 类型 | `<STATE_DIR>/project.json` | 总是（< 20 行）|
-| L2 上下文 | `<STATE_DIR>/context.md` | 总是（摘要：芯片/模块/保护区）|
-| L3 详情 | `project-spec.md` / `problem-log.md` / `sessions/<id>.md` | 按需（用户问到才读）|
+| L2 上下文 | `<STATE_DIR>/context.md` | 总是，但**只读摘要区段**（见下）|
+| L3 详情 | `project-spec.md` / `problem-log.md` / `sessions/<id>.md` / **context.md 其余区段** | 按需（用户问到才读）|
 
-## 执行流程
+### ⚠️ L2 不要整读 context.md
 
-1. **【状态目录】** `get_state_dir()`：`.ea/` 优先，回退 `.em/`（老项目兼容）
-2. **【最小加载】** 读 `state.md` + `project.json` + `context.md` 摘要
-3. **【上下文摘要】** 从 context.md 输出一行关键信息（芯片/当前焦点/保护区警告）
-4. **【输出摘要 + 下一步】**
+`context.md` **会随工程增长到几十 KB**（实测某工程 77,832 B ≈ 20K tokens）—— 其中
+「关键文件基线」的 sha256 列表和「增量学习记录」随每次 `/ea record` 变长。
+整读等于把一次"轻量恢复"变成灌 20K tokens，与 `≤50 行 / 轻量恢复` 的设计直接矛盾。
+
+**正确读法**：只读 `<!-- summary:begin -->` 与 `<!-- summary:end -->` 之间
+（芯片 / 工程与工具链 / 保护区清单）：
+
+```
+Grep: pattern="<!-- summary:(begin|end) -->" path="<STATE_DIR>/context.md" -n
+Read: offset=<begin 行> limit=<end 行 - begin 行 + 1>
+```
+
+**老工程没有标记时**：按标题定位，只读 `## 芯片` 到 `## 保护区清单` 结束这一段，
+**不要**因为找不到标记就退回整文件读取。其余区段等用户问到再按需读。
 
 ## 摘要输出格式
 
