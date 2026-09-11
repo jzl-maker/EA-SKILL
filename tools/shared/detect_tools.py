@@ -177,7 +177,8 @@ def main() -> int:
     print("🔧 EA-SKILL 工具路径自动探测\n")
 
     found_count = 0
-    missing_count = 0
+    reused_count = 0
+    missing: list[str] = []
 
     # 注册表探测优先（Keil / SEGGER 安装必写注册表，能覆盖非标准安装路径）
     reg_found = _registry_find()
@@ -186,37 +187,46 @@ def main() -> int:
         for name, path in reg_found.items():
             print(f"    {name}: {path}")
 
+    # 配置要先读。此前这段是"先报未自动找到，最后才列已注册工具"，于是**同一个工具
+    # 在同一份输出里既'找不到'又'已注册'**（logic2 就这样），看的人只会以为工具坏了。
+    # 真相是两句话在说两件事：前者=本次自动探测没命中，后者=配置里早就有了。
+    # 分不清就得对账，所以先拿到配置，逐工具把这两种情况**分开说**。
+    existing = list_tools()
+
     for tool_name, checks in TOOL_CHECKS.items():
         path = reg_found.get(tool_name) or find_tool(tool_name, checks)
         if path:
             print(f"  ✅ {tool_name}: {path}")
             set_tool_path(tool_name, path, global_=True)
             found_count += 1
+        elif tool_name in existing:
+            info = existing[tool_name]
+            print(f"  🔁 {tool_name}: 本次未自动找到，但配置里已有 → 沿用 "
+                  f"{info['path']} ({info['source']})")
+            reused_count += 1
         else:
-            print(f"  ⬜ {tool_name}: 未自动找到")
-            missing_count += 1
+            print(f"  ⬜ {tool_name}: 未找到（PATH / 常见安装路径 / 环境变量均未命中）")
+            missing.append(tool_name)
 
     print(f"\n{'═' * 50}")
-    print(f"结果: {found_count} 个工具已注册, {missing_count} 个需手动配置\n")
+    print(f"结果: {found_count} 个自动找到并注册, {reused_count} 个沿用已有配置, "
+          f"{len(missing)} 个需手动配置\n")
 
-    if missing_count > 0:
-        print("手动注册命令参考:")
-        print(f'  python -c "')
-        print(f'  import sys; sys.path.insert(0, r\'{_THIS_DIR}\')')
-        print(f'  from tool_config import set_tool_path')
-        print(f'  set_tool_path(\'<工具名>\', r\'<完整路径>\', global_=True)')
-        print(f'  print(\'✅ 已注册\')')
-        print(f'  "')
+    if missing:
+        print("以下工具需手动注册: " + ", ".join(missing))
+        print("  python EA-SKILL/tools/shared/tool_config.py set <工具名> <完整路径> --global")
+        print("  或先设好环境变量（如 LOGIC2_PATH 指向安装目录）再重跑本脚本")
 
-    print("\n当前已注册工具:")
-    existing = list_tools()
+    print("\n当前已注册工具（各脚本实际读取的就是这份）:")
     if existing:
         for name, info in existing.items():
             print(f"  {name}: {info['path']} ({info['source']})")
     else:
         print("  (无)")
 
-    return 0 if found_count > 0 else 1
+    # 退出码表示"还有没有工具没配好"，而不是"这次有没有新发现"：全部已就绪（自动找到
+    # 的 + 早先注册沿用的）就应当算成功，否则调用方会以为要去修一个其实好着的环境。
+    return 0 if not missing else 1
 
 
 if __name__ == "__main__":

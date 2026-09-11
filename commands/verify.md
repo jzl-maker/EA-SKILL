@@ -17,16 +17,32 @@
 3. **【更新状态】** `state.md`: 当前步骤 → `S<N>` 🔄 验证中；`project-spec.md` 步骤表同步
 4. **【四连执行】** 加载 `workflows/verify-flow.md`：
    - **编译** `build-keil` → 成功自动进烧录；失败分析编译日志请求修复
-   - **烧录** `flash-openocd`（含校验）→ 成功自动进 J-Link 验证
+   - **烧录** 后端**可插拔**：ST-Link/CMSIS-DAP → `openocd`；J-Link → `--backend jlink-native`
+     （Windows 装了 SEGGER 驱动时 OpenOCD 用不了 J-Link，判据 `LIBUSB_ERROR_NOT_SUPPORTED`）
+     → 成功自动进 J-Link 验证
    - **J-Link 运行验证** `jlink-debug`：`--regs` 读 PC/SP 确认固件进入 main；`--rtt` 抓启动日志；必要时 `--mem` 读固件区内存
-   - **串口** `serial-monitor` 抓业务启动日志
+   - **串口** `serial-monitor` 抓业务启动日志；**无串口时降级为 RTT** 并在 HVR 标注
    - 结果记入 HVR 的「执行记录」区段
+
+   ⚠️ **任一环因环境不可达时，先走降级路径，不要直接判"验证失败"** —— 那报的是
+   "环境没配好"，却看起来像"代码有问题"。降级事实与**未被覆盖的验证项**都要写进 HVR。
 5. **【保护区/增量审计】** `python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --check`
    - 与 context.md 基线比对：保护区文件有改动且无 approve 记录 → **告警并阻塞验证**
-   - 输出改动清单（供用户确认 diff）
-6. **【生成 HVR】** `<STATE_DIR>/checkpoints/HVR-<步骤>-<序号>.md`（模板 `templates/hvr-template.md`，嵌入式四连字段内嵌）
-7. **【输出验证清单】** 待用户口述物理现象的检查点（LED/按键/波形等）
-8. **【提议 commit】** 见下
+   - 输出改动清单 + **保护区 diff**（供用户确认；关键源文件的 diff 加 `--diff`）
+6. **【git 可用性前置检查】**（要用 git 出 diff 时**必须先跑**）
+   ```bash
+   python ~/.claude/skills/EA-SKILL/tools/shared/git_state.py --root <工程目录>
+   ```
+   - 退出 0 → `git diff` 可用，继续按 git 流程
+   - 退出 1/2 → **不要**再拿 `git diff --stat` 当改动清单：它会返回空输出，
+     看起来像"没有改动"。改用上一步的 `project_guard --check --diff` 基线比对
+
+   ⚠️ 两种静默失效要认得：① 仓库**还没有任何提交** → `git diff` 恒空；
+   ② 仓库根**不是**工程目录（工程是某仓库的子目录）→ 在仓库根 `git add .`
+   会把同级工程一起提交。`git_state.py` 会把这两种情况直接说破。
+7. **【生成 HVR】** `<STATE_DIR>/checkpoints/HVR-<步骤>-<序号>.md`（模板 `templates/hvr-template.md`，嵌入式四连字段内嵌）
+8. **【输出验证清单】** 待用户口述物理现象的检查点（LED/按键/波形等）
+9. **【提议 commit】** 见下
 
 ## commit 提议
 

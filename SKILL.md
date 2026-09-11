@@ -43,7 +43,7 @@ version: 1.2.0
 | `/ea doc` | 文档识别（PDF / Word / Excel → Markdown / JSON）| [doc.md](commands/doc.md) |
 | `/ea test` | 生成测试用例 + 测试代码：`unit` / `board` | [test.md](commands/test.md) |
 | `/ea build` | Keil 编译 | [build.md](commands/build.md) |
-| `/ea flash` | OpenOCD 烧录 | [flash.md](commands/flash.md) |
+| `/ea flash` | 烧录（OpenOCD / J-Link 原生双通道，后者含独立回读校验）| [flash.md](commands/flash.md) |
 | `/ea serial` | 串口监控（CLI/MCP）| [serial.md](commands/serial.md) |
 | `/ea debug` | 调试（J-Link RTT 取证/断点/内存/寄存器/复位放行；OpenOCD ST-Link/DAP 免停机监控）| [debug.md](commands/debug.md) |
 | `/ea svd` | SVD 寄存器地图（外设/位域/枚举 + 免断点读值）| [svd.md](commands/svd.md) |
@@ -62,7 +62,7 @@ version: 1.2.0
 
 1. **保护区文件禁止随意修改**：`startup_*.s`、中断向量表、链接脚本（`*.sct`/`*.ld`/`*.icf`）、`system_*.c` 核心初始化。必须修改时：先给方案+理由 → 用户显式 `/ea approve <文件> <理由>` → 最小 diff。
 2. **老工程默认增量修改**：禁止整文件重写、禁止全盘重写工程；单文件改动 ≥30% 或触碰核心逻辑 → 先给 diff 计划，用户确认。
-3. **所有修改给出 diff**：git 项目用 `git diff`；非 git 项目用 [project_guard.py](tools/shared/project_guard.py) 基线比对。
+3. **所有修改给出 diff**：先用 [git_state.py](tools/shared/git_state.py) 判断 `git diff` 是否真的可用（仓库无提交、或仓库根是工程的父目录时它会**静默返回空**，空 diff 会被误当成"没改动"）；不可用则用 [project_guard.py](tools/shared/project_guard.py) `--check --diff` 基线比对。
 4. **先读 context 再动手**：`new`/`debug`/`verify`/`record` 执行前先读 `<STATE_DIR>/context.md`。
 5. **GBK 编码**：Keil 工程 `.c`/`.h` 为 GB2312 编码，读取按 `encoding="gbk"`，修改用字节级操作，禁止 UTF-8 编辑器直接改中文（会整文件乱码）。
 6. **Git push 禁止**：AI 只提议 commit，`git push` 必须用户手动执行。
@@ -104,7 +104,7 @@ def get_state_dir(root):
 - `commands/` — 20 个命令定义
 - `workflows/` — 工作流：context-build（上下文构建）、chip-learning（芯片学习）、req-clarify（需求澄清）、new-light / new-standard（两档）、verify-flow（编译→烧录→J-Link→串口）、hvr-workflow
 - `templates/` — 模板：state / context / project / hvr / approvals / requirement / 单测与板级测试
-- `tools/` — 工具：build-keil / flash-openocd / serial-mcp / serial-monitor / jlink-debug / svd / instrument（la+scope）/ doc-reader（pdf+docx+xlsx）/ resource（size+map）/ shared / test-runner
+- `tools/` — 工具：build-keil / flash-openocd / flash-jlink（J-Link 原生烧录 + 回读校验）/ serial-mcp / serial-monitor / jlink-debug / svd / instrument（la+scope）/ doc-reader（pdf+docx+xlsx）/ resource（size+map）/ shared / test-runner
 - `mcp-servers/` — serial-mcp MCP server 配置
 
 查看详细：`/ea help <命令>`

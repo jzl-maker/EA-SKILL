@@ -11,9 +11,17 @@
 ## 执行流程
 
 1. **【状态目录】** `get_state_dir()` → `<STATE_DIR>`
-2. **【改动清单】** 用 git 或基线快照计算本次改动：
-   - git 项目：`git status` + `git diff --stat`
-   - 非 git 项目：`python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --check` 基线比对
+2. **【改动清单】** 先跑 git 可用性检查，再决定用哪条路：
+   ```bash
+   python ~/.claude/skills/EA-SKILL/tools/shared/git_state.py --root <工程目录> --scope-only
+   ```
+   - **退出 0** → `git status` + `git diff`（仓库根=工程目录且有提交，可放心用）
+   - **退出 1/2** → 用基线比对：
+     `python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --check --diff`
+
+   ⚠️ **不要跳过这一步直接 `git diff --stat`**：仓库没有提交、或仓库根是工程的父目录时，
+   它都返回 0 却输出为空 —— 空 diff 会被当成"本次没改东西"，记录直接失真。非 git 工程
+   更是本来就取不到 diff（`project_guard` 的基线副本就是为此存的）。
 3. **【保护区核对】** 改动清单中是否有保护区文件：
    - 有且无 approve 记录 → 告警，列出 diff 待用户确认
    - 有且有 approve 记录 → 附上审批条目
