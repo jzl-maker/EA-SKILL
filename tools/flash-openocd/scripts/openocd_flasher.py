@@ -41,6 +41,8 @@ for _candidate in [_SKILLS_DIR / "shared", _SKILLS_DIR.parent / "shared"]:
         sys.path.insert(0, str(_candidate))
         break
 from tool_config import get_tool_path, set_tool_path
+from probe import detect_probes as _shared_detect
+from probe import probe_interfaces as _shared_probe
 
 
 ARTIFACT_EXTENSIONS = {".elf": "elf", ".hex": "hex", ".bin": "bin", ".axf": "elf"}
@@ -124,34 +126,29 @@ def _get_openocd_executable() -> str | None:
     return shutil.which("openocd")
 
 
-def detect_probes() -> list[str]:
+def probe_interfaces() -> list[tuple[str, bool, str | None]]:
+    """逐接口探测 → `[(接口, 是否连接, 未连接的原因)]`。
+
+    判据本身不在这里 —— 见 `tools/shared/probe.py`。同一段判据曾在三个脚本里各存一份
+    且**三份都是错的**（错误输出里恰好含探针关键词，于是"没找到设备"被判成"已连接"），
+    集中一处才能避免下次只修一处。
+    """
     openocd_exec = _get_openocd_executable()
     if not openocd_exec:
         return []
+    return _shared_probe(openocd_exec, INTERFACE_CONFIGS, INTERFACE_PRIORITY)
 
-    detected: list[str] = []
-    for interface in INTERFACE_PRIORITY:
-        cfg = INTERFACE_CONFIGS[interface]
-        try:
-            result = subprocess.run(
-                [openocd_exec, "-f", cfg, "-c", "init; exit"],
-                capture_output=True, text=True, timeout=8,
-            )
-        except Exception:
-            continue
 
-        combined = f"{result.stdout}\n{result.stderr}".lower()
-        if result.returncode == 0 or any(
-            kw in combined for kw in ["cmsis-dap", "st-link", "j-link"]
-        ):
-            if interface not in detected:
-                detected.append(interface)
-            continue
+def detect_probes(with_evidence: bool = False) -> list[str]:
+    """探测已连接的调试探针，返回接口名列表。
 
-        if any(kw in combined for kw in ["open failed", "no device found", "unable to find"]):
-            continue
-
-    return detected
+    `with_evidence=True` 时逐个打印判定依据（`--detect` 用）；内部自动选接口时保持静默。
+    """
+    openocd_exec = _get_openocd_executable()
+    if not openocd_exec:
+        return []
+    return _shared_detect(openocd_exec, INTERFACE_CONFIGS, INTERFACE_PRIORITY,
+                          with_evidence=with_evidence)
 
 
 def choose_interface(explicit: str | None, no_detect: bool) -> str | None:
@@ -350,18 +347,28 @@ def run_flash(cmd: list[str], verbose: bool) -> tuple[bool, list[str]]:
 # 报告输出
 # ---------------------------------------------------------------------------
 
-def print_detect_report(available: bool, version: str | None, probes: list[str]) -> None:
+def print_detect_report(available: bool, version: str | None,
+                        probe_results: list[tuple[str, bool, str | None]]) -> None:
     print("\n📊 OpenOCD 环境探测结果：")
     status = "✅" if available else "❌"
     ver = f" ({version})" if version else ""
     print(f"  {status} openocd{ver}")
+    if not available:
+        return
 
-    if probes:
-        print(f"\n  已连接探针:")
-        for p in probes:
-            print(f"    - {p}")
-    elif available:
+    connected = [i for i, ok, _ in probe_results if ok]
+    if connected:
+        print(f"\n  已连接探针: {', '.join(connected)}")
+    else:
         print("\n  ⚠️ 未检测到已连接的调试探针")
+
+    # 逐接口列出判定依据：探针检测曾把「没找到设备」误判成「已连接」，
+    # 原始错误行摆出来，AI 才能复核这一步而不是照单全收。
+    if probe_results:
+        print("\n  逐接口判定（原始证据）：")
+        for interface, ok, reason in probe_results:
+            print(f"    - {interface}: 已连接" if ok
+                  else f"    - {interface}: 未连接（{reason}）")
 
 
 def print_flash_report(result: FlashResult) -> None:
@@ -414,6 +421,10 @@ def build_parser() -> argparse.ArgumentParser:
         """,
     )
     parser.add_argument("--detect", action="store_true", help="探测 OpenOCD 环境和已连接探针")
+    parser.add_argument(
+        "--backend", choices=["openocd", "jlink-native"], default="openocd",
+        help="烧录通道：openocd（默认）；jlink-native = J-Link 官方通道 + 独立回读校验",
+    )
     parser.add_argument("--artifact", help="固件产物路径")
     parser.add_argument(
         "--interface",
@@ -429,19 +440,84 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scan-configs", help="扫描指定目录中的 OpenOCD 配置线索")
     parser.add_argument("--openocd-command", help="自定义 OpenOCD 烧录命令")
     parser.add_argument("--save-config", action="store_true", help="探测成功后保存工具路径到配置")
+    # --backend jlink-native 的透传参数（--interface 那组是 OpenOCD 探针名，语义不同，故单列）
+    parser.add_argument("--device", help="芯片型号（jlink-native，默认 N32G4FRRE）")
+    parser.add_argument("--jlink-if", dest="jlink_if", help="J-Link 接口 SWD/JTAG（jlink-native）")
+    parser.add_argument("--jlink", help="JLink.exe 路径（jlink-native）")
+    parser.add_argument("--settle", type=float,
+                        help="编程后静置秒数（jlink-native，默认 10；刚编完立刻回读会拿到"
+                             "错位/陈旧镜像，一般不要调小）")
+    # 这两个此前只存在于 flash-jlink 后端，`flash.md` 却让人从**本入口**这么调 ——
+    # 照文档敲必然 argparse 报错。文档没写错，是入口漏声明。
+    parser.add_argument("--verify-only", action="store_true",
+                        help="跳过烧录，只回读比对（jlink-native）")
+    parser.add_argument("--json", action="store_true", help="额外输出 JSON 结论（jlink-native）")
+    parser.add_argument("--dry-run", action="store_true", help="只打印将执行的命令，不实际烧录")
     parser.add_argument("-v", "--verbose", action="store_true", help="详细输出")
     return parser
+
+
+def delegate_jlink_native(args) -> int:
+    """把烧录转交给 `tools/flash-jlink/scripts/jlink_flasher.py`。
+
+    为什么要有这条通道：J-Link 接了探针时 OpenOCD 的 libusb 后端拿不到设备句柄
+    （`LIBUSB_ERROR_NOT_SUPPORTED`，SEGGER 驱动独占），`interface/jlink.cfg` 也救不了
+    —— 那是驱动层的事，与 transport 无关。此时只剩 JLink 官方通道，且它能回读比对，
+    不必再靠"J-Link 说校验通过"这一句自证。
+
+    必须在 `check_openocd()` 之前分流：这条通道根本不需要 OpenOCD，被它拦下就白搭。
+    """
+    backend_dir = Path(__file__).resolve().parents[2] / "flash-jlink" / "scripts"
+    backend = backend_dir / "jlink_flasher.py"
+    if not backend.exists():
+        print(f"❌ 未找到 J-Link 烧录后端: {backend}")
+        print("   → 该后端随 skill 一同分发；若被裁剪，请用 --backend openocd 或补回该目录")
+        return 1
+    sys.path.insert(0, str(backend_dir))
+    import jlink_flasher
+
+    argv = ["--artifact", args.artifact]
+    if args.base_address:
+        argv += ["--base-address", args.base_address]
+    if args.device:
+        argv += ["--device", args.device]
+    if args.jlink_if:
+        argv += ["--if", args.jlink_if]
+    if args.jlink:
+        argv += ["--jlink", args.jlink]
+    if args.no_verify:
+        argv.append("--no-verify")
+    if args.no_reset:
+        argv.append("--no-reset")
+    if args.dry_run:
+        argv.append("--dry-run")
+    if getattr(args, "settle", None) is not None:
+        argv += ["--settle", str(args.settle)]
+    if args.verify_only:
+        argv.append("--verify-only")
+    if args.json:
+        argv.append("--json")
+
+    print("🔀 通道: jlink-native（J-Link 官方通道 + 独立回读校验）")
+    return jlink_flasher.main(argv)
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    # J-Link 原生通道分流（必须在 check_openocd() 之前 —— 它不需要 OpenOCD）
+    if args.backend == "jlink-native":
+        if not args.artifact:
+            print("❌ 请提供 --artifact（固件产物路径）。")
+            return 1
+        return delegate_jlink_native(args)
+
     # 探测模式
     if args.detect:
         available, version = check_openocd()
-        probes = detect_probes() if available else []
-        print_detect_report(available, version, probes)
+        probe_results = probe_interfaces() if available else []
+        print_detect_report(available, version, probe_results)
         if args.save_config and available:
             ocd_path = shutil.which("openocd")
             if ocd_path:

@@ -10,8 +10,8 @@
 | Claude Code | 已安装（CLI / VSCode 扩展） |
 | Python | 3.9+，**用 `py` 启动器**（`python` 可能是 Store 假别名） |
 | Keil MDK | 编译必需（`uv4`），SVD 寄存器地图自动从 Pack 目录发现 |
-| OpenOCD | 烧录必需（`/ea setup` 可自动下载 xpack 版） |
-| J-Link（可选） | RTT 日志 / 断点 / 源码级调试 |
+| OpenOCD | 烧录（ST-Link/CMSIS-DAP 通道）必需（`/ea setup` 可自动下载 xpack 版）；**J-Link 探针走原生通道，不需要它** |
+| J-Link（可选） | RTT 日志 / 断点 / 源码级调试 / **原生烧录（`--backend jlink-native`，含独立回读校验）** |
 | ST-Link / DAP-Link（可选） | OpenOCD 后端免断点内存监控 |
 
 ## 安装
@@ -41,7 +41,7 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 | `/ea doc` | 文档识别（PDF / Word / Excel → Markdown / JSON） |
 | `/ea test` | 生成测试用例 + 测试代码（unit / board） |
 | `/ea build` | Keil 编译 |
-| `/ea flash` | OpenOCD 烧录 |
+| `/ea flash` | 烧录（OpenOCD / J-Link 原生双通道，后者含独立回读校验）|
 | `/ea serial` | 串口监控（CLI/MCP） |
 | `/ea debug` | 调试（J-Link RTT 取证/断点/内存/寄存器/复位放行；OpenOCD 免停机监控） |
 | `/ea svd` | SVD 寄存器地图（外设/位域/枚举 + 免断点读值） |
@@ -72,7 +72,7 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 /ea serial --log .em/logs/uart.log         # 串口监控（另开终端抓日志）
 
 # 3. 调试（代码跑哪了 / 变量对不对 / 日志说了什么）
-#    ⚠️ 执行前先关闭 JLinkRTTViewer.exe —— 它独占探针且会排空 RTT 缓冲，见「常见问题」
+#    ⚠️ 执行前先关闭 JLinkRTTViewer.exe —— 它会排空 RTT 缓冲，历史随即丢失，见「常见问题」
 /ea debug --rtt snapshot                   # RTT 取证：直读 RAM，含已发生的历史日志
 /ea debug --reset-run                      # 复位+放行（配合人工按压测试）
 /ea debug --rtt snapshot --duration 420 --interval 5   # 测试过程中反复采样
@@ -91,7 +91,8 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 
 | 能力 | 硬件 | 状态 |
 |------|------|------|
-| `/ea flash` 烧录 | ST-Link / DAP | ✅ 已验证 |
+| `/ea flash` 烧录 | ST-Link / DAP（OpenOCD 通道） | ✅ 已验证 |
+| `/ea flash --backend jlink-native` | N32G4FR + J-Link（实机烧录 106KB）| ✅ 已验证——J-Link 自报 `Verification failed`，独立回读 3 次一致且 md5 与产物相同，**裁定为 J-Link 误报**（烧录实际成功）。回归用例 F1–F11 |
 | `/ea scope` 波形抓取/测量 | Rigol DS1074Z | ✅ 已验证（Vpp/频率/周期/占空比） |
 | `/ea scope` CSV 解析 | 正点原子 DS100 | ✅ 已验证（自动提取采样率/探头倍率） |
 | `/ea svd` 寄存器地图 | N32G4FR（Keil Pack SVD） | ✅ 已验证（derivedFrom 继承/位域/枚举） |
@@ -107,7 +108,7 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 | 找不到 OpenOCD/J-Link | 运行 `/ea setup` 注册工具路径 |
 | Keil 源码中文乱码 | 工程源文件为 GB2312 编码，禁止 UTF-8 编辑器直接改中文 |
 | 调试 halt 后复位 | 设备带 IWDG 看门狗，缩短 `--run-ms` 或用 OpenOCD 后端免断点读 |
-| **调试时 JLinkRTTViewer.exe 必须关闭** | 探针一次只允许一个进程连接。RTTViewer 独占 J-Link，且会持续推进 `RdOff` 把环形缓冲排空，导致 `--rtt snapshot` 拿不到那段时间的历史。用 `/ea debug` 前先关掉它（`JLinkRTTLogger` / `JLinkRTTClient` / Keil 调试会话同理） |
+| **调试时 JLinkRTTViewer.exe 必须关闭** | 它会持续推进 `RdOff` 把环形缓冲排空，导致 `--rtt snapshot` 拿不到那段时间的历史。用 `/ea debug --rtt snapshot` 前先关掉它（`JLinkRTTLogger` / `JLinkRTTClient` / Keil 调试会话同理）。**注意：它并不阻止烧录**（实机验证：RTTViewer 与 Keil 同时开着，`/ea flash --backend jlink-native` 照常烧录成功），所以"烧录失败"别往这上面赖 |
 | 既要实时看 RTT 又要调试 | 让 `JLinkGDBServerCL -RTTTelnetPort 19021` 持有探针，RTTViewer 界面选 **"Existing Session"**（attach 模式，不占探针），gdb 连 2331 调试。**注意此时 `/ea debug` 的 `--bp/--mem/--rtt snapshot` 均不可用**——那套是给「探针空闲时事后取证」用的 |
 
 ## 开发

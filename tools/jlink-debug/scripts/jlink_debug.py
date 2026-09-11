@@ -58,6 +58,14 @@ try:
 except ImportError:
     get_tool_path = None  # type: ignore
 
+# 探针探测判据（与 flash-openocd / serial-monitor 共用，见 tools/shared/probe.py）
+from probe import detect_first_probe as _shared_first_probe
+# JLink Commander 调用（与 flash-jlink 共用，见 tools/shared/jlink_commander.py）
+from jlink_commander import (
+    DEFAULT_DEVICE, DEFAULT_INTERFACE, DEFAULT_SPEED, MAX_CAPTURE_BYTES,
+    build_commander_script, find_jlink, run_commander,
+)
+
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -69,16 +77,13 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-DEFAULT_DEVICE = "N32G4FRRE"
-DEFAULT_INTERFACE = "SWD"
-DEFAULT_SPEED = 4000
 DEFAULT_RTT_CHANNEL = 0
 DEFAULT_RUN_MS = 2000
 RTT_PID_FILE = Path(os.environ.get("TEMP", ".")) / "ea_skill_rtt.pid"
 
-# JLink Commander 输出捕获上限。connect 失败时 JLink 会退回交互式提示并狂刷字符，
-# 实测产生过 189MB 输出；成功输出仅数十 KB，故截断头部足够覆盖结果。
-MAX_CAPTURE_BYTES = 8 << 20
+# DEFAULT_DEVICE / DEFAULT_INTERFACE / DEFAULT_SPEED / MAX_CAPTURE_BYTES 现在住在
+# tools/shared/jlink_commander.py（flash-jlink 也要用同一套）。
+
 # RTT 控制块探测长度：acID[16] + NumUp(4) + NumDown(4) + aUp[0](24) = 48，取 64 留余量。
 # 不按结构体全量读（aUp/aDown 数量随编译期配置变），避免越界到 RAM 边界外。
 RTT_CB_PROBE = 0x40
@@ -100,6 +105,10 @@ RTT_MODE_BLOCKING = 2
 # 写入放不下时**才停止推进 WrOff，所以 WrOff 会停在任意位置（实测 2048B 缓冲停在
 # 2046，还剩 1 字节余量），并非停在 size-1。只能按比例提示。
 RTT_FULL_WARN_RATIO = 0.9
+# 复位后、首次采样前要等的时长。复位瞬间 RAM 还没被目标重建，RTT 控制块是全 0，
+# 此时去读必然判「地址无效」—— 那是**与探针无关**的定性，会把排查引向符号表，
+# 而真相只是「目标还没跑到 SEGGER_RTT_Init」。留一段稳定时间再读。
+RTT_RESET_SETTLE_S = 0.4
 # 会**消费** RTT 环形缓冲的进程。它们不只独占探针，还会持续推进 RdOff 把缓冲读空，
 # 使 savebin 直读取不到已被消费的历史——比单纯"占用探针"更隐蔽。
 RTT_CONSUMER_IMAGES = (
@@ -149,21 +158,7 @@ def _exe_path(jlink_dir: Path, name: str) -> str | None:
         return str(p)
     return None
 
-def find_jlink(explicit: str | None = None) -> tuple[str | None, Path | None]:
-    """返回 (jlink_exe 路径, jlink 安装目录)，找不到返回 (None, None)。"""
-    if explicit:
-        p = Path(explicit)
-        if p.exists():
-            return str(p), p.parent
-        return None, None
-    configured = get_tool_path("jlink") if get_tool_path else None
-    if configured and Path(configured).exists():
-        return str(Path(configured)), Path(configured).parent
-    found = shutil.which("JLink.exe") or shutil.which("JLink")
-    if found:
-        p = Path(found)
-        return str(p), p.parent
-    return None, None
+# find_jlink 已移至 tools/shared/jlink_commander.py（flash-jlink 共用），见文件头 import。
 
 def find_peers() -> dict[str, str | None]:
     """探测 J-Link 同目录的 RTT Logger / GDB Server / gdb 工具链。"""
@@ -291,20 +286,13 @@ def _get_openocd_exe() -> str | None:
 
 
 def ocd_detect_probe(exe: str) -> str | None:
-    """用 `init; exit` 探测已连接的探针类型（stlink 优先）。"""
-    for iface in OCD_INTERFACE_PRIORITY:
-        cfg = OCD_INTERFACE_CONFIGS[iface]
-        try:
-            res = subprocess.run([exe, "-f", cfg, "-c", "init; exit"],
-                                 capture_output=True, text=True, timeout=8)
-        except Exception:
-            continue
-        combined = f"{res.stdout}\n{res.stderr}".lower()
-        if res.returncode == 0 or any(kw in combined for kw in ("cmsis-dap", "st-link", "j-link")):
-            return iface
-        if any(kw in combined for kw in ("open failed", "no device found")):
-            continue
-    return None
+    """用 `init; exit` 探测已连接的探针类型（stlink 优先）。
+
+    判据见 tools/shared/probe.py —— 原先这里与 flash-openocd / serial-monitor 各存
+    一份"错误输出含探针关键词即判已连接"的错判据，会让 OpenOCD 后端自动选中一个
+    不存在的接口，白白阻塞到超时。
+    """
+    return _shared_first_probe(exe, OCD_INTERFACE_CONFIGS, OCD_INTERFACE_PRIORITY)
 
 
 def _ocd_tcl(port: int, cmd: str, timeout: float = 3.0) -> str | None:
@@ -437,86 +425,9 @@ def ocd_read_regs(port: int) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # JLink Commander 脚本执行
 # ---------------------------------------------------------------------------
-
-def build_commander_script(
-    device: str,
-    interface: str,
-    speed: int,
-    body: list[str],
-) -> str:
-    """生成自包含的 JLink Commander 脚本。"""
-    lines = [
-        f"si {interface}",
-        f"speed {speed}",
-        f"device {device}",
-        "connect",
-        *body,
-        "exit",
-    ]
-    return "\n".join(lines) + "\n"
-
-def run_commander(
-    jlink_exe: str,
-    script: str,
-    timeout: int = 60,
-    device: str = DEFAULT_DEVICE,
-    interface: str = DEFAULT_INTERFACE,
-    speed: int = DEFAULT_SPEED,
-    cwd: str | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """执行 JLink Commander 脚本文件，返回 CompletedProcess（stdout 为已解码文本）。
-
-    JLink < V7.60 不支持 `-CommanderScript -`（stdin），故仍写临时脚本文件。
-
-    加固点（旧实现用 `capture_output=True` 无 stdin 重定向，实测刷到 189MB 并
-    全部缓进内存）：
-
-    1. `stdin=DEVNULL` —— `connect` 失败时 Commander 会退回交互式提示并持续向
-       stdout 吐字符；stdin 若继承父进程管道则永远读不到 EOF，刷屏不止。
-    2. 命令行显式带 `-Device/-If/-Speed/-AutoConnect 1/-ExitOnError 1` —— 脚本内
-       的 `device/si/speed/connect` 保留（冗余但无害），实测带命令行参数才稳定。
-    3. stdout 落临时文件再截断读取，超大输出不进内存。
-    4. 显式 `encoding="utf-8"` —— 否则按 locale(cp936) 解码，非 ASCII 抛
-       UnicodeDecodeError。
-    """
-    fd, tmp_path = tempfile.mkstemp(suffix=".jlink", prefix="ea_skill_")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(script)
-        cmd = [
-            jlink_exe,
-            "-Device", device,
-            "-If", interface,
-            "-Speed", str(speed),
-            "-AutoConnect", "1",
-            "-ExitOnError", "1",
-            "-CommanderScript", tmp_path,
-        ]
-        with tempfile.TemporaryFile() as sink:
-            proc = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=sink,
-                stderr=subprocess.STDOUT,
-                timeout=timeout,
-                cwd=cwd,
-            )
-            sink.seek(0)
-            raw = sink.read(MAX_CAPTURE_BYTES + 1)
-        truncated = len(raw) > MAX_CAPTURE_BYTES
-        if truncated:
-            raw = raw[:MAX_CAPTURE_BYTES]
-        out = raw.decode("utf-8", errors="replace")
-        if truncated:
-            out += (f"\n[ea-skill] ⚠️ JLink 输出超过 {MAX_CAPTURE_BYTES >> 20}MB 已截断"
-                    "（通常意味着 connect 失败后退回了交互式提示）")
-        return subprocess.CompletedProcess(proc.args, proc.returncode, out, "")
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
+# build_commander_script / run_commander 已移至 tools/shared/jlink_commander.py，
+# 由文件头 import 引入（flash-jlink 需要同一套加固：stdin=DEVNULL、输出落盘截断、
+# 显式 utf-8 解码）。加固点说明见该模块 docstring。
 
 def scan_occupying_processes(
     images: tuple[str, ...] = JLINK_OCCUPYING_IMAGES,
@@ -822,6 +733,13 @@ def rtt_show(log_file: str | Path, tail: int | None = None,
         print(f"❌ 读取失败: {exc}")
         return []
     lines = _decode_log(raw, encoding).splitlines()
+    if not lines:
+        # 文件存在但 0 字节**不是**成功。原先这里零输出，调用方无从区分
+        # 「目标还没输出」和「工具读坏了」—— 后者才是要排查的，前者只要再等等。
+        print(f"⚠️ 日志为空：{log_path}（{size} 字节）—— 目标尚未通过 RTT 输出任何内容。")
+        print("   → 确认固件已烧录且调用过 SEGGER_RTT_Init；"
+              "`--rtt snapshot` 可直读 RAM 取回已发生的历史日志")
+        return []
     shown = lines if tail is None else lines[-tail:]
     for line in shown:
         print(line)
@@ -1029,10 +947,13 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
             return 1
         print("   ⚠️ --force：继续采集，但历史可能已被消费，结果不保证完整")
 
+    did_reset = False
     if args.reset_run:
         if do_reset_run(jlink_exe, args.device, args.interface, args.speed, False) != 0:
             print("❌ 复位+放行失败，中止采集")
             return 1
+        did_reset = True
+        time.sleep(RTT_RESET_SETTLE_S)   # 等目标重建控制块，理由见该常量处
 
     enc = args.encoding
     duration = args.duration
@@ -1086,11 +1007,16 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
             print("      排查 → 是否有其它进程占用 J-Link（RTTViewer/Logger/GDBServer/Keil 调试），"
                   "再查 USB、芯片供电、SWD 接线")
         elif err == "cb-id":
-            # 地址层面：与探针无关，别让 AI 去查进程
-            print(f"   [{iteration}] ⚠️ 地址无效：0x{cb_addr:08X} 处不是 SEGGER_RTT_CB"
-                  f"（读到 {s['head']!r}）")
-            print("      排查 → 地址错，与探针/接线无关：核对 .map 的 _SEGGER_RTT，"
-                  "或用 --cb-addr 显式指定")
+            if did_reset and iteration == 1:
+                # 刚复位：控制块要等目标跑过 SEGGER_RTT_Init 才成形，读到全 0 是**预期**的。
+                # 此时定性成「地址无效」是错的 —— 会把排查引向符号表，而它跟地址无关。
+                print(f"   [{iteration}] ℹ️ 目标尚未初始化 RTT（复位后首轮），稍后重试")
+            else:
+                # 地址层面：与探针无关，别让 AI 去查进程
+                print(f"   [{iteration}] ⚠️ 地址无效：0x{cb_addr:08X} 处不是 SEGGER_RTT_CB"
+                      f"（读到 {s['head']!r}）")
+                print("      排查 → 地址错，与探针/接线无关：核对 .map 的 _SEGGER_RTT，"
+                      "或用 --cb-addr 显式指定")
         elif err == "not-init":
             print(f"   [{iteration}] ⚠️ RTT 未初始化：NumUp={s['num_up']}"
                   "（目标未调用 SEGGER_RTT_Init，或已 deinit）")
@@ -1245,6 +1171,7 @@ def do_bp(
     run_ms: int,
     device: str,
     dry_run: bool,
+    json_out: bool = False,
 ) -> int:
     addr = parse_address(symbol_or_addr, symbols)
     if addr is None:
@@ -1292,19 +1219,37 @@ def do_bp(
 
     regs = parse_regs(output)
     pc = regs.get("R15") or regs.get("PC")
+    pc_val = (pc & ~1) if pc is not None else None
+
+    # 两件事分开算：PC **落在**哪个函数体内（当前跑到哪），与 PC **正好是**哪个符号的
+    # 入口（= 断点命中）。原先两个独立循环各扫一遍符号表，同一个 PC 解出两个名字也没人
+    # 发现；合成一趟，两个结果互相对照。
+    in_func: str | None = None
+    at_entry: str | None = None
+    if pc_val is not None:
+        for name, info in symbols.items():
+            if info["type"] not in ("Thumb Code", "Code"):
+                continue
+            if at_entry is None and info["addr"] == pc_val:
+                at_entry = name
+            if in_func is None and info["addr"] <= pc_val < info["addr"] + max(info["size"], 1):
+                in_func = name
+
+    if json_out:
+        print(json.dumps({
+            "breakpoint": {"request": symbol_or_addr, "address": f"0x{addr:08X}"},
+            "pc": f"0x{pc:08X}" if pc is not None else None,
+            "hit_symbol": at_entry,
+            "in_function": in_func,
+            "registers": {k: f"0x{v:08X}" for k, v in regs.items()},
+        }, ensure_ascii=False))
+        return 0
+
     print("\n📊 停止位置分析：")
     if pc is not None:
-        hit_name = "?"
-        for name, info in symbols.items():
-            if info["addr"] == (pc & ~1) or info["addr"] <= (pc & ~1) < info["addr"] + max(info["size"], 1):
-                if info["type"] in ("Thumb Code", "Code"):
-                    hit_name = name
-                    break
-        print(f"   PC = 0x{pc:08X}  ({hit_name})")
-        for name, info in symbols.items():
-            if info["addr"] == (pc & ~1) and info["type"] in ("Thumb Code", "Code"):
-                print(f"   → 命中断点: {name}  size={info['size']}")
-                break
+        print(f"   PC = 0x{pc:08X}  ({in_func or '?'})")
+        if at_entry:
+            print(f"   → 命中断点: {at_entry}  size={symbols[at_entry]['size']}")
     for name in ("R0", "R1", "R2", "R3", "R14", "SP"):
         if name in regs:
             print(f"   {name} = 0x{regs[name]:08X}")
@@ -1738,8 +1683,8 @@ def main() -> int:
     if args.rtt == "stop":
         return rtt_stop()
     if args.rtt == "show":
-        rtt_show(args.log, args.tail, args.encoding)
-        return 0
+        # 空日志/文件不存在都算失败：让调用方（verify 四连、workflow）能判成败
+        return 0 if rtt_show(args.log, args.tail, args.encoding) else 1
     if args.rtt == "snapshot":
         return do_rtt_snapshot(args, symbols)
 
@@ -1764,7 +1709,8 @@ def main() -> int:
 
     try:
         if args.bp:
-            return do_bp(args.bp, symbols, jlink_exe, args.run_ms, args.device, args.dry_run)
+            return do_bp(args.bp, symbols, jlink_exe, args.run_ms, args.device,
+                         args.dry_run, args.json)
         if args.mem:
             return do_mem(args, symbols, jlink_exe, args.ocd_port)
         if args.regs:
