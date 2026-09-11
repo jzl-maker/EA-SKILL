@@ -3,3 +3,5 @@ __pycache__/
 .em/
 .ea/
 *.log
+# 测试运行产生的临时状态（fake JLink 的目标 RAM 快照等）
+tests/_*_state.json

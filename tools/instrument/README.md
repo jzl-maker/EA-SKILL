@@ -5,7 +5,11 @@
 | 脚本 | 命令 | 设备 | 底层 |
 |------|------|------|------|
 | `scripts/logic_analyzer.py` | `/ea la` | Saleae Logic 8 / Pro 8 / Pro 16 | Logic 2 Automation API（`logic2-automation`） |
+| `scripts/waveform.py` | （`/ea la` 内部） | — | 仅标准库：解析 `digital.csv`、通道素描、内置 UART / SPI / I2C 解码 |
 | `scripts/scope.py` | `/ea scope` | Rigol DS1000Z 系列 | PyVISA + SCPI over USB/LAN |
+
+`waveform.py` 是 Logic 2 解码表失真时的退路：它只吃 `digital.csv` 的精确跳变时刻，
+不经过 Logic 2 的渲染（后者把不可打印字节写成 `.`、NUL 写成 `\0`，二进制协议下不可信）。
 
 ## 安装
 
@@ -37,6 +41,7 @@ py .../scripts/deps_check.py --install
 ## 相关文件
 
 - `scripts/common.py` — 共享 harness（控制台/JSON/依赖/输出目录）
+- `scripts/waveform.py` — `digital.csv` 解析 / 通道素描 / 内置 UART + SPI + I2C 解码
 - `scripts/deps_check.py` — 依赖与后端探测（`/ea setup` 调用）
 - `commands/la.md` — `/ea la` 命令文档
 - `commands/scope.md` — `/ea scope` 命令文档

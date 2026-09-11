@@ -1,7 +1,7 @@
 ---
 name: ea-skill
 description: 嵌入式 AI 开发管家（EA-SKILL）— 面向单片机/嵌入式工程（Keil/CubeMX/ESP-IDF/PlatformIO/Arduino）的需求澄清与方案确认、新功能开发、单元测试、板级工装测试、编译烧录、J-Link 调试与验证。当用户要对嵌入式新老项目开发新功能、加外设、改业务逻辑、排查硬件 bug、验证固件、生成测试用例，或需求描述不清晰需要讨论确认方案、需要读取 PDF/Word/Excel 文档（芯片手册/需求规格/引脚表）时使用；对话提到 编译/烧录/串口/RTT/断点/内存监视/需求分析/文档识别 等嵌入式关键词时按需加载。
-version: 1.1.0
+version: 1.2.0
 ---
 
 # EA-SKILL（Embedded AI）

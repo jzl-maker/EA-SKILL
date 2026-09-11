@@ -72,9 +72,12 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 /ea serial --log .em/logs/uart.log         # 串口监控（另开终端抓日志）
 
 # 3. 调试（代码跑哪了 / 变量对不对 / 日志说了什么）
+#    ⚠️ 执行前先关闭 JLinkRTTViewer.exe —— 它独占探针且会排空 RTT 缓冲，见「常见问题」
 /ea debug --rtt snapshot                   # RTT 取证：直读 RAM，含已发生的历史日志
 /ea debug --reset-run                      # 复位+放行（配合人工按压测试）
 /ea debug --rtt snapshot --duration 420 --interval 5   # 测试过程中反复采样
+#    ↑ snapshot 读走即推进 RdOff（读走即消费，要留存加 --out）；不推进会因缓冲
+#      写满而丢日志，BLOCKING 模式下还会把目标锁死。要纯只读加 --no-consume
 /ea debug --mem _TimeCount_10ms --no-halt --watch 5    # 变量采样且不打断目标
 /ea debug --bp Display_BootDoraemon --run-ms 2000      # 断点定位
 /ea svd --chip N32G4FR --read RCC CR       # 免断点读寄存器 + 位域解码
@@ -104,6 +107,8 @@ cp -r EA-SKILL ~/.claude/skills/EA-SKILL
 | 找不到 OpenOCD/J-Link | 运行 `/ea setup` 注册工具路径 |
 | Keil 源码中文乱码 | 工程源文件为 GB2312 编码，禁止 UTF-8 编辑器直接改中文 |
 | 调试 halt 后复位 | 设备带 IWDG 看门狗，缩短 `--run-ms` 或用 OpenOCD 后端免断点读 |
+| **调试时 JLinkRTTViewer.exe 必须关闭** | 探针一次只允许一个进程连接。RTTViewer 独占 J-Link，且会持续推进 `RdOff` 把环形缓冲排空，导致 `--rtt snapshot` 拿不到那段时间的历史。用 `/ea debug` 前先关掉它（`JLinkRTTLogger` / `JLinkRTTClient` / Keil 调试会话同理） |
+| 既要实时看 RTT 又要调试 | 让 `JLinkGDBServerCL -RTTTelnetPort 19021` 持有探针，RTTViewer 界面选 **"Existing Session"**（attach 模式，不占探针），gdb 连 2331 调试。**注意此时 `/ea debug` 的 `--bp/--mem/--rtt snapshot` 均不可用**——那套是给「探针空闲时事后取证」用的 |
 
 ## 开发
 

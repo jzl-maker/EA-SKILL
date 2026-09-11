@@ -14,6 +14,7 @@
   py doc_reader.py <文件> --pages 1-20    # PDF 页范围（也支持 1,5,7-9）
   py doc_reader.py <文件> --sheet Sheet1  # 只解析指定工作表（可多次）
   py doc_reader.py <文件> --json          # 结构化 JSON（供 AI 消费）
+  py doc_reader.py <文件> --keep-watermark  # 保留平铺水印行（默认自动过滤）
   py doc_reader.py --scan <目录>          # 列出目录下可识别文档
 
 返回码: 0=成功 / 1=解析失败（含不支持的格式）
@@ -22,8 +23,10 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
+import math
 import re
 import sys
 import zipfile
@@ -53,6 +56,32 @@ UNSUPPORTED_HINT = {
 TABLE_PREVIEW_ROWS = 20     # 默认表格展示行数（--full 解除）
 OUTLINE_SNIPPET = 200       # --outline 每节摘录字符数
 DEFAULT_MAX_ROWS = 1000     # 每个工作表默认解析上限（--full / --max-rows 覆盖）
+
+# 平铺水印过滤（PDF 专有）。斜向铺满页面的"仅供 XX 参考"水印会被文本层逐字提取，
+# 表现为**大量重复的极短行**——实测某 16 页规格书 987 非空行里 788 行是纯水印行（80%），
+# 既污染正文，也把 --outline 的每页摘录额度占满，使其失去"快速判断文档讲什么"的作用。
+# 判据用文档频率而非字符白名单：水印内容因文档而异（"仅供东屋参考"/"机密"/"CONFIDENTIAL"），
+# 写死换一份文档就失效。真内容的短行（项目符号、编号、单字标题）不会重复上百次。
+# 只认**单字**行。平铺水印是逐个字形分别落位的，被文本层提取后就是一行一个字；
+# 而真内容里偶有高频的短行（分隔线 "___"、".." 之类）是多字的。放宽到多字会让这类
+# 行的每个字都混进水印字符集，进而误伤别处正文——收紧到单字的代价只是漏掉
+# "整句水印被提取成一行"的情形，那种本来也超不过长度限制。
+WATERMARK_MAX_LEN = 1
+# 阈值用**比例**而非固定次数。水印按页平铺，其出现次数随文档篇幅线性增长，比例稳定；
+# 而固定阈值两头不讨好：大文档里重复出现的短标题（"注意"×200、"警告"×150）会越过
+# 阈值被当水印删掉，单页读取时水印又攒不够次数而漏判（实测单页每字最多 9 次）。
+# 实测水印字约占非空行的 9%，重复标题/表格取值列通常在 3% 以下，取 5% 分隔。
+WATERMARK_MIN_RATIO = 0.05
+WATERMARK_ABS_FLOOR = 4     # 绝对下限：几十行的短文档按比例算出的阈值太小，会误伤偶然重复
+# 还需**多个不同**的极短行同时高频：水印是短语（"仅供东屋参考"→6 个不同字），
+# 而项目符号是同一个字反复出现。少了这道阀，一份用了很多独立成行 "■" 的文档
+# 会被误判成水印、项目符号被整体删掉——误删正文比漏过滤水印严重得多。
+WATERMARK_MIN_DISTINCT = 3
+_WM_LEAD_RE = re.compile(r"^(\S)\s+")    # 行首孤立水印字（有分隔）：'参 57600' → '57600'
+_WM_TRAIL_RE = re.compile(r"\s(\S)$")    # 行尾孤立水印字：'...com) 考' → '...com)'
+
+# 解析器产物版本。**改动解析/清理逻辑导致产物语义变化时必须 +1**，否则旧缓存继续命中。
+PARSER_VERSION = 2
 
 # OOXML 命名空间
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -137,7 +166,11 @@ def file_sha256(path: Path, chunk: int = 1 << 20) -> str:
 
 
 def cache_path(src: Path) -> Path | None:
-    """缓存路径按内容哈希命名 → 内容变则文件名变，无需失效判断。"""
+    """缓存路径按[解析器版本 + 内容哈希]命名。
+
+    带版本号是必要的：解析逻辑升级后（如新增水印过滤），源文件哈希不变但**产物语义
+    已变**，只按内容哈希命名会让旧缓存继续命中，修复对老用户永远不生效。
+    """
     sd = state_dir(src.parent)
     if sd is None:
         return None
@@ -145,7 +178,7 @@ def cache_path(src: Path) -> Path | None:
     digest = file_sha256(src)[:8]
     out = sd / "docs"
     out.mkdir(parents=True, exist_ok=True)
-    return out / f"{stem}-{digest}.json"
+    return out / f"{stem}-v{PARSER_VERSION}-{digest}.json"
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +207,97 @@ def parse_pages(spec: str | None, total: int) -> list[int]:
     return sorted(picked)
 
 
-def read_pdf(path: Path, pages: str | None) -> Doc:
+def detect_watermark_chars(lines: list[str]) -> tuple[set[str], dict[str, int]]:
+    """按**文档频率**识别水印字符集，返回 (字符集, {重复的极短行: 次数})。
+
+    只看"去空白后 ≤WATERMARK_MAX_LEN 个字符、且出现次数 ≥
+    max(WATERMARK_ABS_FLOOR, 总行数×WATERMARK_MIN_RATIO)"的行，并要求命中的短行
+    至少有 WATERMARK_MIN_DISTINCT 种——正常文档里没有哪种内容会以单字形式重复
+    上百次，故不会误伤正文。
+    """
+    stripped = [l.strip() for l in lines]
+    total = sum(1 for s in stripped if s)
+    if not total:
+        return set(), {}
+    threshold = max(WATERMARK_ABS_FLOOR, math.ceil(total * WATERMARK_MIN_RATIO))
+    counts = collections.Counter(s for s in stripped if 0 < len(s) <= WATERMARK_MAX_LEN)
+    hit = {s: n for s, n in counts.items() if n >= threshold}
+    if len(hit) < WATERMARK_MIN_DISTINCT:
+        return set(), {}     # 只有同一种短行高频 → 更像项目符号，不判为水印
+    return {c for s in hit for c in s}, hit
+
+
+def _is_watermark_only(text: str, wm_chars: set[str]) -> bool:
+    """整段只由水印字符组成（如单独一行"屋"）。"""
+    s = text.strip()
+    return bool(s) and all(c in wm_chars for c in s)
+
+
+def clean_line(line: str, wm_chars: set[str]) -> str:
+    """剥离行首/行尾**有空白分隔**的孤立水印字（`参 57600` → `57600`，`com) 考` → `com)`）。
+
+    只在两侧字符确实属于**检测出的**水印集时才剥离，故不会误伤 `- item` 这类正常行首。
+
+    **刻意不处理行首紧贴内容的水印字**（`考版本V1.0.5`）：水印字多为常用汉字，
+    `参考电压` 的"参"、"供应" 的"供" 都与水印集重合，剥离会直接改坏正文。
+    这类残留每页至多一两个字符，可读性不受影响，交由 `--keep-watermark` 之外的人工判断。
+    """
+    m = _WM_LEAD_RE.match(line)
+    if m and m.group(1) in wm_chars:
+        line = line[m.end():]
+    m = _WM_TRAIL_RE.search(line)
+    if m and m.group(1) in wm_chars:
+        line = line[:m.start()]
+    return line
+
+
+def strip_watermark(lines: list[str], wm_chars: set[str]) -> tuple[list[str], int]:
+    """去掉纯水印行并清理行首水印字，返回 (保留的行, 丢弃的行数)。"""
+    kept: list[str] = []
+    dropped = 0
+    for line in lines:
+        if _is_watermark_only(line, wm_chars):
+            dropped += 1
+            continue
+        kept.append(clean_line(line, wm_chars))
+    return kept, dropped
+
+
+def remove_watermark(doc: Doc) -> None:
+    """就地清理 PDF 分节里的平铺水印（正文 + 表格单元格）。
+
+    必须先收集全文再判定：频次是**文档级**统计，逐页看会漏判。
+    """
+    page_lines = [l for s in doc.sections if s.kind == "page" for l in s.text.splitlines()]
+    cell_lines = [c for s in doc.sections if s.kind == "table" for row in s.rows for c in row]
+    wm_chars, hit = detect_watermark_chars(page_lines + cell_lines)
+    if not wm_chars:
+        return
+
+    dropped = 0
+    for s in doc.sections:
+        if s.kind == "page" and s.text:
+            kept, n = strip_watermark(s.text.splitlines(), wm_chars)
+            s.text = "\n".join(kept).strip()
+            dropped += n
+        elif s.kind == "table":
+            for row in s.rows:
+                for i, cell in enumerate(row):
+                    if _is_watermark_only(cell, wm_chars):
+                        row[i] = ""
+                    else:
+                        row[i] = clean_line(cell, wm_chars).strip()
+
+    top = "、".join(f'"{k}"×{v}' for k, v in
+                    sorted(hit.items(), key=lambda kv: -kv[1])[:4])
+    doc.meta["watermark"] = 1          # 机器可读标志；详细说明在下面的 warning 里
+    doc.warnings.append(
+        f"检测到平铺水印（{top}），已过滤 {dropped} 行水印、清理 {len(wm_chars)} 个水印字符"
+        "（含表格单元格）；要保留原始文本请加 --keep-watermark"
+    )
+
+
+def read_pdf(path: Path, pages: str | None, keep_watermark: bool = False) -> Doc:
     try:
         import pdfplumber
     except ImportError:
@@ -230,6 +353,8 @@ def read_pdf(path: Path, pages: str | None) -> Doc:
         doc.warnings.append(
             f"{len(idx) - with_text} 页无文本层（可能是扫描页/纯图页），已跳过其文本"
         )
+    if not keep_watermark:
+        remove_watermark(doc)
     return doc
 
 
@@ -514,7 +639,7 @@ def _esc(text: str) -> str:
 
 
 def read_doc(path: Path, pages: str | None = None, sheets: list[str] | None = None,
-             max_rows: int = 0) -> Doc:
+             max_rows: int = 0, keep_watermark: bool = False) -> Doc:
     if not path.exists():
         raise DocError(f"文件不存在: {path}")
     if path.is_dir():
@@ -528,7 +653,7 @@ def read_doc(path: Path, pages: str | None = None, sheets: list[str] | None = No
         )
 
     if ext == ".pdf":
-        return read_pdf(path, pages)
+        return read_pdf(path, pages, keep_watermark)
     if ext == ".docx":
         if pages:
             raise DocError("--pages 只适用于 PDF")
@@ -585,6 +710,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="结构化 JSON 输出")
     parser.add_argument("--out", metavar="FILE", help="同时写入文件")
     parser.add_argument("--no-cache", action="store_true", help="忽略缓存，强制重新解析")
+    parser.add_argument("--keep-watermark", action="store_true",
+                        help="保留平铺水印行（默认自动过滤 PDF 文本层里的水印）")
     parser.add_argument("--max-rows", type=int, default=0,
                         help="每个工作表最多解析行数（0=不限）")
     args = parser.parse_args(argv)
@@ -599,12 +726,14 @@ def main(argv: list[str] | None = None) -> int:
     max_rows = 0 if args.full else (args.max_rows or DEFAULT_MAX_ROWS)
 
     try:
-        cp = None if args.no_cache else cache_path(src)
+        # --keep-watermark 产出的是另一份内容：既不能读默认缓存，也不能覆盖它
+        cp = None if (args.no_cache or args.keep_watermark) else cache_path(src)
         if cp is not None and cp.is_file():
             doc = Doc.from_dict(json.loads(cp.read_text(encoding="utf-8")))
             doc.warnings.append(f"（缓存命中: {cp.name}）")
         else:
-            doc = read_doc(src, pages=args.pages, sheets=args.sheet, max_rows=max_rows)
+            doc = read_doc(src, pages=args.pages, sheets=args.sheet, max_rows=max_rows,
+                           keep_watermark=args.keep_watermark)
             if cp is not None:
                 cp.write_text(json.dumps(doc.to_dict(), ensure_ascii=False),
                               encoding="utf-8")

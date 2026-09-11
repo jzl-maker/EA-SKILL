@@ -6,10 +6,19 @@ Logic 2 软件的脚本服务器（默认端口 10430），支持：
 
 - --detect         探测 pip 依赖 / Logic 2 软件 / 脚本端口 / 设备
 - --list-devices   列出已连接设备（含模拟设备）
-- --capture        时间触发抓取 + 协议解码 + 导出（默认主流程）
+- --capture        定时抓取 + 协议解码 + 导出（默认主流程）
+- --trigger-channel 数字边沿触发抓取（抓偶发事件，不必硬录满全程）
 - --load <file.sal> 复用已有捕获做解码/导出（不重新抓取）
+- --decode-uart    **不经 Logic 2 解码器**，从 digital.csv 的跳变时刻直接解出精确字节
+- --decode-spi     同上，内置 SPI 解码（clk/mosi/miso/cs + mode）
+- --decode-i2c     同上，内置 I2C 解码（START/STOP、7 位地址、ACK/NACK）
 - --simulate       用 Logic 2 内置模拟设备（无硬件自测，解码管线照跑）
 - --dry-run        只打印将执行的 API 调用序列，不连接任何设备
+
+两条解码路径要分清：Logic 2 的 `export_data_table`（decoded.csv）方便看帧结构，但
+**对二进制协议有损**（不可打印字节渲染成 `.`、NUL 渲染成 `\0`），字节值不可信；
+`--export-raw` + `--decode-uart/--decode-spi/--decode-i2c` 走 `waveform.py`，只吃
+digital.csv 的精确跳变时刻，是字节值的可靠来源。
 
 依赖：logic2-automation（pip）+ Logic 2 GUI 软件（非 pip，需单独安装）。
 """
@@ -20,6 +29,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import waveform
 from common import (
     add_common_args,
     check_logic2_port,
@@ -29,6 +39,28 @@ from common import (
     parse_value,
     require_module,
 )
+
+# --trigger-edge 取值 → logic2-automation 的 DigitalTriggerType 成员名。
+# 三者必须精确匹配已装包（没有 DigitalTriggerEdge 这个枚举，别按直觉写）。
+TRIGGER_TYPES = {
+    "rising": "RISING",
+    "falling": "FALLING",
+    "pulse-high": "PULSE_HIGH",
+    "pulse-low": "PULSE_LOW",
+}
+
+# 无触发模式下的长录制提醒阈值（秒）——偶发事件硬录很容易白录
+LONG_CAPTURE_WARN_S = 30.0
+
+# 触发等待兜底的宽限（秒）：留给 wait() 收尾与触发后录制的调度开销
+TRIGGER_GRACE_S = 5.0
+
+# 内置解码的错误帧占比超过它就认为整份结果不可信（波特率给错的典型表现是
+# "零星伪字节 + 大量 framing error"，而不是全错，不点明就会被当成真数据）
+UART_SUSPECT_ERROR_RATIO = 0.20
+
+# 内置解码的三个开关（都在 waveform.py 里实现，都吃 digital.csv）
+DECODE_FLAGS = ("decode_uart", "decode_spi", "decode_i2c")
 
 # 常用 analyzer 类型与设置键速查（以已装 Logic 2 的 Analyzer 定义为准）
 ANALYZER_QUICK_REF = {
@@ -133,11 +165,16 @@ def pick_device(devices: list, name_filter: str | None, prefer_sim: bool = False
     return devices[0]
 
 
+def _channel_list(args) -> list[int]:
+    """本次要采的数字通道。dry-run 与真实抓取共用，避免两处各写一份而对不上。"""
+    if args.channels is not None:
+        return [int(c) for c in args.channels.split(",") if c.strip()]
+    return list(range(8))
+
+
 def build_device_config(args, device, automation) -> object:
     """构造 LogicDeviceConfiguration（通道/采样率/阈值/模拟通道）。"""
-    digital = list(range(8))
-    if args.channels is not None:
-        digital = [int(c) for c in args.channels.split(",") if c.strip()]
+    digital = _channel_list(args)
 
     rate = args.sample_rate
     dtype_name = getattr(getattr(device, "device_type", None), "name", "") or ""
@@ -163,6 +200,89 @@ def build_device_config(args, device, automation) -> object:
         kwargs["enabled_analog_channels"] = [int(c) for c in args.analog_channels.split(",")]
         kwargs["analog_sample_rate"] = args.analog_sample_rate
     return automation.LogicDeviceConfiguration(**kwargs)
+
+
+def build_capture_config(args, automation):
+    """默认定时抓取；给了 --trigger-channel 则用数字边沿触发。
+
+    两者互斥的字段要注意：DigitalTriggerCaptureMode **没有 duration_seconds**，
+    触发后的录制长度由 after_trigger_seconds 决定（这里统一用 --duration 的值，
+    含义从"录多久"变成"触发后录多久"）。
+    """
+    if args.trigger_channel is None:
+        return automation.CaptureConfiguration(
+            capture_mode=automation.TimedCaptureMode(duration_seconds=args.duration))
+
+    member = TRIGGER_TYPES[args.trigger_edge]
+    ttype = getattr(automation.DigitalTriggerType, member, None)
+    if ttype is None:
+        print(f"❌ 已装的 logic2-automation 没有 DigitalTriggerType.{member}，"
+              f"请升级该 pip 包")
+        sys.exit(1)
+    print(f"  ▶ 触发: ch{args.trigger_channel} {args.trigger_edge} "
+          f"（触发后录 {args.duration}s，最多等 {args.trigger_timeout or '∞'}s）")
+    return automation.CaptureConfiguration(
+        capture_mode=automation.DigitalTriggerCaptureMode(
+            trigger_type=ttype,
+            trigger_channel_index=args.trigger_channel,
+            after_trigger_seconds=args.duration,
+        ))
+
+
+def warn_capture_size(args) -> None:
+    """抓取前把"这次要录多久"摆到台面上 —— 偶发事件硬录很容易白录。"""
+    if args.trigger_channel is not None or args.duration < LONG_CAPTURE_WARN_S:
+        return
+    samples = args.sample_rate * args.duration
+    print(f"  ⚠️  无触发模式，将从头录满 {args.duration:g}s"
+          f"（{samples/1e6:.0f}M 采样点/通道）")
+    print("      偶发事件建议改用 --trigger-channel <n> --trigger-edge rising|falling，"
+          "只录触发前后，避免白录")
+
+
+def wait_capture(capture, args) -> bool:
+    """等待抓取结束。返回 False 表示触发超时、本次没取到数据。
+
+    触发模式下 `Capture.wait()` 会阻塞到触发发生为止，而 **API 没有超时参数** ——
+    触发不来就是永久挂住。这里用守护线程做超时兜底，超时后 `capture.stop()` 中止。
+    代价是 stop() 与 wait() 会并发（官方文档建议二者不要用于同一次抓取），这是
+    为了"可中止"而接受的取舍；不想要这个取舍就用 --trigger-timeout 0 走原生无限等待。
+    """
+    if args.trigger_channel is None or args.trigger_timeout <= 0:
+        capture.wait()
+        return True
+
+    import threading
+
+    done = threading.Event()
+    box: dict = {}
+
+    def _worker():
+        try:
+            capture.wait()
+            box["ok"] = True
+        except Exception as exc:                       # noqa: BLE001 —— 原样抛回主线程
+            box["err"] = exc
+        finally:
+            done.set()
+
+    # wait() 包住"等触发 + 触发后录制"两段，而 API 不暴露触发时刻，
+    # 所以兜底时长必须是 等触发上限 + 触发后录制时长，否则触发真来了也等不完。
+    budget = args.trigger_timeout + args.duration + TRIGGER_GRACE_S
+    threading.Thread(target=_worker, daemon=True).start()
+    if not done.wait(budget):
+        print(f"  ⏱️  等满 {args.trigger_timeout:g}s 也没等到 ch{args.trigger_channel} "
+              f"{args.trigger_edge} 触发，中止本次抓取（未取到数据）")
+        print("      确认触发条件（边沿方向/通道号）是否正确；"
+              "确实需要无限等待就加 --trigger-timeout 0")
+        try:
+            capture.stop()
+        except Exception as exc:                       # noqa: BLE001
+            print(f"      （stop() 报告：{exc}）")
+        return False
+    if "err" in box:
+        raise box["err"]
+    return True
 
 
 def _expand_serial(settings: dict) -> list[dict]:
@@ -196,6 +316,185 @@ def add_analyzers(capture, specs: list[tuple[str, dict]]) -> list:
     return ids
 
 
+def export_decoded_table(capture, out_dir: Path, analyzer_ids: list) -> None:
+    """导出协议解码表，并**立刻检查它是否被 Logic 2 渲染坏了**。
+
+    Logic 2 把不可打印字节渲染成 `.`（0x2E）、NUL 渲染成字面量 `\\0`，二进制协议
+    （UART/SPI/I2C）的数据列因此基本不可信 —— 真机据此得出过错误结论。导完就扫一遍，
+    有问题当场说，别等用户把 `.` 当成真的 0x2E。
+    """
+    decoded = out_dir / "decoded.csv"
+    capture.export_data_table(str(decoded), analyzers=analyzer_ids)
+    print(f"  ✅ 协议解码表 → {decoded}")
+    for line in waveform.format_lossy_warning(waveform.scan_decoded_csv(decoded)):
+        print(line)
+
+
+def export_raw_csv(capture, out_dir: Path) -> bool:
+    """导出 digital.csv 等原始数据，返回是否成功（失败不阻断后续步骤）。"""
+    try:
+        capture.export_raw_data_csv(str(out_dir))
+    except Exception as exc:                           # noqa: BLE001
+        print(f"  ⚠️  原始数据导出失败：{exc}")
+        return False
+    print(f"  ✅ 原始数据 CSV → {out_dir}/digital.csv")
+    return True
+
+
+def run_waveform_analysis(args, out_dir: Path) -> None:
+    """在 digital.csv 上做纯软件分析：通道素描 + 内置 UART 解码。
+
+    这条路径完全绕开 Logic 2 的解码器，是解码表失真时的退路；通道素描也顺带回答
+    "哪个通道才是 TX" 这个每次都要人肉数跳变的问题。
+    """
+    csv_path = out_dir / "digital.csv"
+    if not csv_path.is_file():
+        print(f"  ⚠️  没找到 {csv_path.name}，跳过通道统计/内置解码")
+        return
+    try:
+        wave = waveform.load_digital_csv(csv_path)
+    except (OSError, ValueError) as exc:
+        print(f"  ⚠️  {csv_path.name} 解析失败：{exc}")
+        return
+
+    print(f"\n  📊 通道素描（{csv_path.name}，{wave.rows} 行，"
+          f"{wave.duration:.6g}s）：")
+    for ch in wave.channels:
+        print(waveform.describe_channel(ch, wave.t_end))
+
+    if not any(getattr(args, f) for f in DECODE_FLAGS):
+        print("      提示：加 --decode-uart / --decode-spi / --decode-i2c \"...\" "
+              "可直接解出精确字节（例：--decode-uart \"ch=7,baud=auto\"）")
+        return
+
+    results: dict[str, waveform.UartResult] = {}
+    for spec_text in args.decode_uart:
+        try:
+            spec = waveform.parse_uart_spec(spec_text)
+        except ValueError as exc:
+            print(f"  ❌ --decode-uart {spec_text!r}: {exc}")
+            continue
+        for role, ch_spec in spec.channels.items():
+            ch = _resolve_channel(wave, spec_text, "--decode-uart", ch_spec)
+            if ch is None:
+                continue
+            baud = spec.baud
+            if baud is None:
+                est = ch.estimate_baud()
+                if est is None:
+                    print(f"  ❌ ch{ch.index} 没有跳变，无法估波特率，请显式给 baud=")
+                    continue
+                baud = est[1]
+                if est[2] > 0.03:
+                    print(f"  ⚠️  ch{ch.index} 波特率粗估 {est[0]:.0f} 距标准档 "
+                          f"{est[1]} 偏 {est[2]*100:.1f}%，结果可能不可靠，"
+                          f"建议显式给 baud=")
+            res = waveform.decode_uart(ch, baud, data_bits=spec.data_bits,
+                                       parity=spec.parity, stop_bits=spec.stop_bits)
+            results[role.upper()] = res
+            _print_uart_result(ch, res, spec)
+
+    for spec_text in args.decode_spi:
+        _run_spi_spec(wave, spec_text)
+    for spec_text in args.decode_i2c:
+        _run_i2c_spec(wave, spec_text)
+
+    hint = waveform.swap_hint(results.get("TX"), results.get("RX"))
+    if hint:
+        print("  " + hint)
+
+
+def _resolve_channel(wave, spec_text: str, flag: str, ch_spec: str):
+    """通道号 → Channel；找不到就报错并列出可用通道（不静默跳过）。"""
+    ch = wave.resolve(ch_spec)
+    if ch is None:
+        names = ", ".join(f"ch{c.index}" for c in wave.channels)
+        print(f"  ❌ {flag} {spec_text!r}: 找不到通道 {ch_spec!r}（可用：{names}）")
+    return ch
+
+
+def _run_spi_spec(wave, spec_text: str) -> None:
+    """解一路 SPI 配置（可含 MOSI/MISO 两向）。"""
+    try:
+        spec = waveform.parse_spi_spec(spec_text)
+    except ValueError as exc:
+        print(f"  ❌ --decode-spi {spec_text!r}: {exc}")
+        return
+    chans: dict = {}
+    labels: dict[str, str] = {}
+    for role, ch_spec in spec.signals.items():
+        ch = _resolve_channel(wave, spec_text, "--decode-spi", ch_spec)
+        if ch is None:
+            return
+        chans[role] = ch
+        labels[role] = f"ch{ch.index}"
+    res = waveform.decode_spi(chans["CLK"], chans.get("MOSI"), chans.get("MISO"),
+                              chans.get("CS"), mode=spec.mode, bits=spec.bits,
+                              order=spec.order)
+    for line in waveform.format_spi_report(res, labels):
+        print(line)
+
+
+def _run_i2c_spec(wave, spec_text: str) -> None:
+    """解一路 I2C 总线。"""
+    try:
+        spec = waveform.parse_i2c_spec(spec_text)
+    except ValueError as exc:
+        print(f"  ❌ --decode-i2c {spec_text!r}: {exc}")
+        return
+    scl = _resolve_channel(wave, spec_text, "--decode-i2c", spec.scl)
+    sda = _resolve_channel(wave, spec_text, "--decode-i2c", spec.sda)
+    if scl is None or sda is None:
+        return
+    res = waveform.decode_i2c(scl, sda)
+    for line in waveform.format_i2c_report(res, f"ch{scl.index}", f"ch{sda.index}"):
+        print(line)
+
+
+def _print_uart_result(ch, res, spec) -> None:
+    """打印一路 UART 的解码结果（精确字节 + 错误定位）。"""
+    framing = sum(1 for f in res.errors if f.error == "framing")
+    parity = sum(1 for f in res.errors if f.error == "parity")
+    print(f"\n  🔎 ch{ch.index} 内置 UART 解码 "
+          f"（{res.baud:g} baud {spec.data_bits}{spec.parity[:1].upper() or 'N'}"
+          f"{spec.stop_bits:g}）：{len(res.good)} 字节"
+          + (f"，framing error {framing}" if framing else "")
+          + (f"，parity error {parity}" if parity else ""))
+    if res.good:
+        for line in waveform.format_hex_rows(res.bytes_):
+            print(line)
+    for f in res.errors[:5]:
+        print(f"    ⚠️  t={f.t:.9f}s {f.error} error（值 0x{f.value:02X}，本帧不可用）")
+    if len(res.errors) > 5:
+        print(f"    ⚠️  另有 {len(res.errors)-5} 个错误帧未列出")
+    total = len(res.frames)
+    if total and len(res.errors) / total >= UART_SUSPECT_ERROR_RATIO:
+        # 波特率给错时不是"全错"，而是解出零星几个伪字节 + 大量 framing error；
+        # 那几个伪字节看着像真数据，必须点明整份结果不可信（真机踩过）。
+        print(f"    ⚠️  错误帧占 {len(res.errors)}/{total}"
+              f"（{len(res.errors)/total:.0%}）—— 整体不可信，别直接采信上面那几个字节。"
+              f"优先核对 baud 是否对、该通道是否真是 UART"
+              f"（波特率正确时应当基本没有 framing error）")
+
+
+def report_artifacts(out_dir: Path) -> None:
+    """报告实际产物的行数与体积 —— 抓完就该知道这次录了多少。"""
+    files = sorted(p for p in out_dir.glob("*") if p.is_file())
+    if not files:
+        return
+    print("\n  📦 产物：")
+    for p in files:
+        size = p.stat().st_size
+        rows = ""
+        if p.suffix == ".csv":
+            try:
+                with p.open("r", encoding="utf-8", errors="replace") as f:
+                    rows = f"  {sum(1 for _ in f) - 1} 行"
+            except OSError:
+                pass
+        print(f"     {p.name:<24} {size/1024:8.1f} KB{rows}")
+
+
 def export_capture(capture, args, out_dir: Path, analyzer_ids: list) -> None:
     """抓取完成后统一导出 raw CSV / 解码表 / .sal。
 
@@ -204,11 +503,9 @@ def export_capture(capture, args, out_dir: Path, analyzer_ids: list) -> None:
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.export_raw:
-        capture.export_raw_data_csv(str(out_dir))
-        print(f"  ✅ 原始数据 CSV → {out_dir}/")
+        export_raw_csv(capture, out_dir)
     if args.decoder:
-        capture.export_data_table(str(out_dir / "decoded.csv"), analyzers=analyzer_ids)
-        print(f"  ✅ 协议解码表 → {out_dir}/decoded.csv")
+        export_decoded_table(capture, out_dir, analyzer_ids)
     if args.save:
         save = Path(args.save).resolve()
         capture.save_capture(str(save))
@@ -331,25 +628,33 @@ def do_capture(args) -> int:
               f"[{getattr(getattr(device, 'device_type', None), 'name', '?')}]")
 
         dev_cfg = build_device_config(args, device, automation)
+        warn_capture_size(args)
         capture = manager.start_capture(
             device_configuration=dev_cfg,
-            capture_configuration=automation.CaptureConfiguration(
-                capture_mode=automation.TimedCaptureMode(duration_seconds=args.duration)
-            ),
+            capture_configuration=build_capture_config(args, automation),
         )
         with capture:
             analyzer_ids = add_analyzers(capture, specs)
-            print(f"  ⏳ 抓取中 {args.duration}s ...")
-            capture.wait()
+            print(f"  ⏳ 抓取中 {args.duration}s ..."
+                  if args.trigger_channel is None
+                  else f"  ⏳ 等待 ch{args.trigger_channel} {args.trigger_edge} 触发 ...")
+            if not wait_capture(capture, args):
+                return 1
 
             out_dir = (Path(args.export_dir) if args.export_dir
                        else default_output_dir("la")).resolve()
             export_capture(capture, args, out_dir, analyzer_ids)
+            if args.export_raw:            # 有 digital.csv 就出通道素描（问题 5）
+                run_waveform_analysis(args, out_dir)
             if args.plot and args.export_raw:
                 plot_csv_dir(out_dir, args.plot)
+            report_artifacts(out_dir)
 
             summary = {"device": getattr(device, "device_id", None),
-                       "duration_s": args.duration, "export_dir": str(out_dir)}
+                       "duration_s": args.duration, "export_dir": str(out_dir),
+                       "trigger": (None if args.trigger_channel is None else
+                                   {"channel": args.trigger_channel,
+                                    "edge": args.trigger_edge})}
             if args.json:
                 emit_json(summary)
     return 0
@@ -375,13 +680,19 @@ def do_load(args) -> int:
             out_dir = (Path(args.export_dir) if args.export_dir
                        else default_output_dir("la_reuse")).resolve()
             out_dir.mkdir(parents=True, exist_ok=True)
+            if args.export_raw:
+                export_raw_csv(capture, out_dir)
             if args.decoder:
-                capture.export_data_table(str(out_dir / "decoded.csv"), analyzers=analyzer_ids)
-                print(f"  ✅ 协议解码表 → {out_dir}/decoded.csv")
+                export_decoded_table(capture, out_dir, analyzer_ids)
             if args.save:
                 save = Path(args.save).resolve()
                 capture.save_capture(str(save))
                 print(f"  ✅ 捕获已保存 → {save}")
+            if args.export_raw:
+                run_waveform_analysis(args, out_dir)
+                if args.plot:
+                    plot_csv_dir(out_dir, args.plot)
+            report_artifacts(out_dir)
             if args.json:
                 emit_json({"loaded": str(args.load), "export_dir": str(out_dir),
                            "analyzers": [s[0] for s in specs]})
@@ -397,23 +708,41 @@ def _print_dry_run(args, specs: list[tuple[str, dict]], load: bool = False) -> N
     if load:
         print(f"  manager.load_capture({args.load!r})")
     else:
+        chans = _channel_list(args)
         print("  manager.get_devices() → pick_device(...)")
-        print(f"  LogicDeviceConfiguration(digital_channels=0..7, "
-              f"sample_rate={args.sample_rate}, "
+        print(f"  LogicDeviceConfiguration(enabled_digital_channels={chans}, "
+              f"digital_sample_rate={args.sample_rate}, "
               f"threshold={args.threshold or '默认档位'})")
-        print(f"  manager.start_capture(CaptureConfiguration("
-              f"TimedCaptureMode({args.duration}s)))")
+        if args.trigger_channel is None:
+            print("  manager.start_capture(CaptureConfiguration("
+                  f"TimedCaptureMode(duration_seconds={args.duration})))")
+        else:
+            print("  manager.start_capture(CaptureConfiguration("
+                  "DigitalTriggerCaptureMode("
+                  f"trigger_type=DigitalTriggerType.{TRIGGER_TYPES[args.trigger_edge]}, "
+                  f"trigger_channel_index={args.trigger_channel}, "
+                  f"after_trigger_seconds={args.duration})))")
+            print(f"  # 等触发的上限 {args.trigger_timeout:g}s（不含触发后录制的 "
+                  f"{args.duration:g}s）；--trigger-timeout 0 = 无限等待，"
+                  "触发不来会一直挂住")
     for atype, settings in specs:
         print(f"  capture.add_analyzer({atype!r}, {settings!r})")
     print("  capture.wait()")
     if args.export_raw and not load:
-        print("  capture.export_raw_data_csv(<export-dir>)")
+        print("  capture.export_raw_data_csv(<export-dir>)   # → digital.csv")
     if args.decoder:
         print("  capture.export_data_table(<export-dir>, analyzers=[...])")
     if args.save:
         print(f"  capture.save_capture({args.save!r})")
     if args.plot:
         print(f"  plot_csv_dir(<export-dir>, {args.plot!r})")
+    if args.export_raw or any(getattr(args, f) for f in DECODE_FLAGS):
+        print("\n  # 之后在 digital.csv 上做纯软件分析（不经 Logic 2 解码器）：")
+        print("  waveform.load_digital_csv(<export-dir>/digital.csv)")
+        print("  → 每通道素描：跳变数 / 高位占比 / 最短脉宽 / 波特率粗估")
+        for kind in ("uart", "spi", "i2c"):
+            for spec_text in getattr(args, f"decode_{kind}"):
+                print(f"  → waveform.decode_{kind}({spec_text!r})  # 用跳变时刻直接解字节")
     print("\n（用 --simulate 可无硬件真跑一遍解码管线）")
 
 
@@ -429,6 +758,16 @@ def build_parser() -> argparse.ArgumentParser:
             "  py logic_analyzer.py --capture --channels 0,1,2,3 --sample-rate 10000000 "
             "--duration 2 --decoder \"uart:TX=0,RX=1,Bit Rate (Bits/s)=115200\"\n"
             "  py logic_analyzer.py --load trace.sal --decoder \"spi:CLK=0,MOSI=1,MISO=2\"\n"
+            "  py logic_analyzer.py --capture --channels 7 --export-raw "
+            "--decode-uart \"ch=7,baud=auto\"\n"
+            "      # ↑ 不经 Logic 2 解码器，直接从跳变时刻解出精确字节\n"
+            "  py logic_analyzer.py --load trace.sal "
+            "--decode-spi \"clk=0,mosi=1,miso=2,cs=3,mode=0\"\n"
+            "  py logic_analyzer.py --load trace.sal --decode-i2c \"scl=3,sda=4\"\n"
+            "      # ↑ SPI / I2C 内置解码，同样绕开 Logic 2 的失真解码表\n"
+            "  py logic_analyzer.py --capture --channels 7,15 --trigger-channel 7 "
+            "--trigger-edge falling --duration 0.2\n"
+            "      # ↑ 只录 ch7 下降沿之后 0.2s，抓偶发事件不必硬录满全程\n"
         ),
     )
     act = parser.add_mutually_exclusive_group()
@@ -449,6 +788,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decoder", action="append", default=[], metavar="TYPE:K=V,...",
                         help="添加解码器，可重复，如 'uart:TX=0,RX=1,Bit Rate (Bits/s)=115200'")
 
+    parser.add_argument("--decode-uart", action="append", default=[], metavar="ch=N,baud=B",
+                        help="不依赖 Logic 2 的内置 UART 解码，直接从 digital.csv 的跳变"
+                             "时刻解出精确字节。可重复；baud 给 auto 则按最短脉宽粗估。"
+                             "例：'ch=7,baud=57600'、'TX=7,RX=15,baud=auto'。"
+                             "自动开启 --export-raw")
+    parser.add_argument("--decode-spi", action="append", default=[], metavar="clk=N,...",
+                        help="内置 SPI 解码（同样只吃 digital.csv）。可重复；至少要给 "
+                             "clk 和 mosi/miso 之一，cs 可选（给了按片选切帧最可靠）。"
+                             "例：'clk=0,mosi=1,miso=2,cs=3,mode=0,bits=8,order=msb'；"
+                             "mode 不给则自检 CPOL（CPHA 按 0）。自动开启 --export-raw")
+    parser.add_argument("--decode-i2c", action="append", default=[], metavar="scl=N,sda=N",
+                        help="内置 I2C 解码（同样只吃 digital.csv）。可重复。"
+                             "例：'scl=3,sda=4'。输出 START/STOP、7 位地址 + 读写位、"
+                             "每字节 ACK/NACK。自动开启 --export-raw")
+    parser.add_argument("--trigger-channel", type=int, metavar="N",
+                        help="数字触发通道号：只从该通道满足触发条件时开始录，"
+                             "抓偶发事件不必硬录满全程")
+    parser.add_argument("--trigger-edge", choices=sorted(TRIGGER_TYPES), default="rising",
+                        help="触发条件（默认 rising）")
+    parser.add_argument("--trigger-timeout", type=float, default=120.0, metavar="S",
+                        help="触发模式下**等触发的上限**秒数（默认 120，0=无限等待）；"
+                             "不含触发后录制的那段。Logic 2 的 wait() 本身没有超时，"
+                             "触发不来会永久挂住，这里用守护线程兜底中止")
+
     parser.add_argument("--export-raw", action="store_true", help="导出原始数据 CSV（写目录）")
     parser.add_argument("--export-dir", help="导出目录（默认 <STATE_DIR>/captures/la_<ts>/）")
     parser.add_argument("--save", metavar="FILE.sal", help="保存 .sal 捕获文件")
@@ -465,8 +828,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def normalize_args(args) -> None:
+    """内置解码都要 digital.csv，没显式开 --export-raw 就自动打开。"""
+    used = [f for f in DECODE_FLAGS if getattr(args, f)]
+    if used and not args.export_raw:
+        args.export_raw = True
+        flag = "--" + used[0].replace("_", "-")
+        print(f"  ℹ️  {flag} 需要 digital.csv，已自动开启 --export-raw")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    normalize_args(args)
+    if args.load and args.trigger_channel is not None:
+        print("  ⚠️  --trigger-channel 对 --load 无意义（捕获已录好），本次忽略")
+        args.trigger_channel = None
     if args.detect:
         return do_detect(args)
     if args.list_analyzer_types:

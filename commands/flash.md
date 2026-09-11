@@ -49,12 +49,28 @@ python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py 
 | target-response-abnormal | 芯片未进入调试模式 | 检查芯片供电、复位电路 |
 | project-config-error | target 配置文件与芯片不匹配 | 检查 --target 参数 |
 | Unsupported transport | --interface 参数错误 | 使用正确的接口类型 (stlink/jlink/cmsis-dap) |
+| `Verification failed @ 0x08000000`（J-Link）| **多为误报**——回读固件与待烧 hex 的 MD5 完全一致 | **先比 MD5 再排查**：一致就忽略该报错，别去查接线/供电/复位 |
 
 ## 注意事项
 
 ⚠️ **--interface 必须与烧录时使用的接口一致**
 
 ⚠️ **--target 必须匹配实际芯片型号**
+
+⚠️ **J-Link 报 `Verification failed @ 0x08000000` 多为误报，先核验再排查**
+
+实测该校验报错出现时，**回读 Flash 与待烧 hex 的 MD5 完全一致** —— 固件其实烧对了。
+遇到时先核验：把 Flash 对应区域回读成 bin，与 hex 转出的 bin 比对 MD5。
+
+- MD5 **一致** → **忽略这个报错**，固件是好的。**不要**据此去查接线 / 供电 / 复位电路，
+  那是往错的方向排查，会白费一整轮。
+- MD5 **不一致** → 才是真的烧录失败，按上面「常见错误」排查。
+
+⚠️ **烧录前清掉其它 J-Link 进程**
+
+探针一次只允许一个进程连接。`JLinkRTTLogger.exe`（`/ea debug --rtt start` 起的）/
+`JLinkRTTViewer.exe` 还开着时，烧录会连不上或行为异常 —— 采集完 RTT 记得先 `--rtt stop`。
+详见 `commands/debug.md` 的「不要和 JLinkRTTViewer 同时开」。
 
 ## 相关文件
 - `~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py` - 烧录脚本

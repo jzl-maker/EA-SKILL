@@ -1,0 +1,20 @@
+Component: ARM Compiler 5.06 update 6 (build 750) Tool: armasm [4d35d2]
+
+Image Symbol Table
+
+    Local Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    _SEGGER_RTT                              0x200014dc   Data         120  segger_rtt.o(.bss)
+    _acUpBuffer                              0x20001554   Data        2048  segger_rtt.o(.bss)
+    _TimeCount_10ms                          0x20020228   Data           4  ehtimer.o(.data)
+    Display_BootDoraemon                     0x08001d29   Thumb Code    80  ehimage.o(i.Display_BootDoraemon)
+
+    Global Symbols
+
+    Symbol Name                              Value     Ov Type        Size  Object(Section)
+
+    main                                     0x08000185   Thumb Code   144  main.o(i.main)
+
+Memory Map of the image

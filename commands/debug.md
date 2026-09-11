@@ -81,7 +81,7 @@ $BJ --resolve Display_BootDoraemon
 
 | 方式 | 能拿历史数据 | 丢行 | 适用场景 |
 |------|-------------|------|----------|
-| `--rtt snapshot`（savebin 直读 RAM）| ✅ **全部** | **逐字节精确** | ✅ **取证 / 回读已发生的日志** |
+| `--rtt snapshot`（savebin 直读 RAM）| ✅ **全部** | **逐字节精确** | ✅ **取证 / 回读已发生的日志**（读走即推进 RdOff）|
 | `--rtt start`（JLinkRTTLogger）| ❌ 只能抓 attach 之后 | 高吞吐时会丢 | 先 start 再复位，抓启动日志 |
 | `JLinkGDBServerCL -RTTTelnetPort` | ❌ 只能抓 attach 之后 | **随机丢行**（实测 RUN1 丢 `[12]`、RUN2 丢开头两行）| ⚠️ **不可用于取证** |
 
@@ -92,13 +92,71 @@ $BJ --resolve Display_BootDoraemon
 ```
 1. savebin 读 SEGGER_RTT_CB 控制块（acID[16] + NumUp + NumDown + aUp[0]）
 2. 校验 cb[0:10] == b"SEGGER RTT"     ← 挡住 savebin 错位读出的垃圾
-3. 从 aUp[0] 取 pBuffer / SizeOfBuffer / WrOff / RdOff
+3. 从 aUp[0] 取 pBuffer / SizeOfBuffer / WrOff / RdOff / Flags
 4. 按 WrOff 取环形缓冲 [rd, wr) 区间，处理回绕
 5. 轮询模式下记住上一轮 WrOff，只取新增段
+6. 把 RdOff 推进到已读位置（`w4` 后台写）—— **唯一一处会写目标 RAM**，见下节
 ```
 
 **丢行判定**：轮询时若两次采样之间目标写出量接近整圈（`--interval` 太长 / 输出太快），工具会告警并计入疑似丢失字节。缩短 `--interval` 即可。
-另注意：本工具**只读不回写 RdOff**，目标侧缓冲写满后会按 RTT 跳过策略丢弃数据，因此高频输出场景请缩短采样间隔。
+
+### RTT 是单消费者缓冲：不推进 RdOff 会丢日志，甚至锁死目标
+
+环形缓冲是**单消费者**设计：读取端读走 `[RdOff, WrOff)` 后有责任推进 RdOff，把空间还给目标。
+`JLinkRTTViewer` / `JLinkRTTLogger` 这类正规 RTT 主机会推进；**`savebin` 直读不会** ——
+所以这一步必须由本工具自己补上。不补的后果按 `Flags`（RTT 上行缓冲模式）分两种：
+
+| Flags | 写满时目标的行为 | 现象 |
+|-------|-----------------|------|
+| `NO_BLOCK_SKIP`(0) / `NO_BLOCK_TRIM`(1) | 丢弃这次写入，目标照常跑 | **WrOff 冻结**，之后所有 `SEGGER_RTT_printf` 被静默丢弃。实测 2048B 缓冲跑到第 8 轮停在 2046，看起来像"目标卡死"，其实目标在正常跑——是本工具把证据弄丢了 |
+| `BLOCK_IF_FIFO_FULL`(2) | `SEGGER_RTT_Write` **自旋等 RdOff** | 没人推进 → **目标永久锁死在该自旋里**，外部现象与死机/跑飞无法区分，极易误判成软件 bug |
+
+后者是"只读取证"最危险的一面：一个声称非侵入的工具反而把目标弄挂了。所以默认**采集后把 RdOff
+推进到已读位置**（`w4` 写控制块，走 AHB-AP 后台写，同样不 halt、不复位）：
+
+- 轮询时搭**下一轮脚本的车**（`w4` 排在 savebin 之前），零额外 JLink 启动开销；
+  放前面也是为了尽早释放空间——savebin 要搬运整个环缓冲，把 `w4` 放后面就等于让缓冲多满这么久。
+- 收尾再补一次独立写回。**单次快照走的正是这条路**：它读完即结束，没有"下一轮"可搭车。
+- 写的值是本工具**已经读走**的那段，不会吃掉还没读的数据；写的是 32 位对齐字段，目标侧只需保证 WrOff 只增，不存在读到半截数据的可能。
+- 工具会**回读校验**写回是否真的生效，不生效就明确报警，不会假装没事。
+
+代价：读走即消费 —— 和 RTTViewer 一样，同一段历史只能被读一次（要留存就加 `--out`）。
+需要退回**纯只读**（一个字节都不写目标 RAM）时加 `--no-consume`，但那两种后果随之而来，
+工具会在采集开始时说明。
+
+### 不要和 JLinkRTTViewer 同时开
+
+**RTTViewer 开着的时候，`--rtt snapshot` 一定失败**，原因有两层：
+
+1. **探针独占**：J-Link 一次只允许一个进程连接。RTTViewer 占着时，本工具所有需要连
+   J-Link 的操作（snapshot / bp / mem / regs / reset-run / rtt start）都会报「无法连接目标」。
+2. **历史被排空**（更隐蔽）：RTTViewer 是正规 RTT 主机，会持续读并**推进 `RdOff`**。
+   只要它开着，环形缓冲就一直是空的——事后再跑 `--rtt snapshot` 也取不回那段数据，
+   因为它已经被 RTTViewer 消费掉了。
+
+两者是**按阶段二选一**，不是互补：
+
+| 你想干什么 | 用什么 | 代价 |
+|-----------|--------|------|
+| 实时盯着看 | RTTViewer 窗口 | 事后取不回历史 |
+| 拿历史 / 取证 | `--rtt snapshot`（先关掉 RTTViewer）| 没有实时视图 |
+| 既要实时又要事后 | `--rtt start` 写日志 → `--rtt show` 读文件 | 探针仍被占，不能同时开 RTTViewer |
+| 既要实时又要能下断点 | GDBServer 持探针 + RTTViewer 选 **"Existing Session"**（attach，不占探针）| 本工具的 `--bp/--mem/--rtt snapshot` 全部不可用 |
+
+**本工具自己的 `--rtt start` 也会占住探针** —— 它后台起的就是 `JLinkRTTLogger.exe`。
+在 `--rtt stop` 之前，凡走 `JLink.exe` 的操作（`--rtt snapshot` / `--bp` / `--mem` /
+`--regs` / `--reset-run`）一律连不上：**这两个进程不能同时占用探针**，是 J-Link 的硬性
+限制，不是配置问题。所以「一边 Logger 实时抓、一边 snapshot 取证」做不到，只能二选一。
+同理，Logger 还开着时**烧录也会失败**（见 `commands/flash.md`）。
+
+**工具已内置防护**，不必靠人记得关：
+
+- `--rtt snapshot` 开跑前扫描占用进程，命中即**中止采集**并列出 PID，要求关掉后重试；
+  确认要带病采集才加 `--force`（`--rtt start` 同理，但它的 `--force` 是清理残留 Logger）。
+- 首轮读到空缓冲（`wr == rd`）时**不再静默返回 0 字节**，而是区分成因：
+  「已被其它读取端取空」还是「目标尚未输出」——两者排查方向完全相反。
+- 扫描名单**排除 Keil**（`UV4.exe`）：它只在调试会话进行中才占探针，
+  算进去会在你只是开着 Keil 时误伤。
 
 ### 为什么可以「随便暂停读 RAM」——JLink Commander 的非侵入性
 
@@ -170,7 +228,8 @@ _TimeCount_10ms        0x20020228   Data          size=4   ehtimer.o(.data)
 | `--duration S` | 否 | `--rtt snapshot` 持续采集秒数（优先于 `--poll`）|
 | `--encoding` | 否 | RTT 日志解码：`auto`(默认，先 UTF-8 再回落 GBK)/`gbk`/`utf-8` |
 | `--out <文件>` | 否 | `--rtt snapshot` 原始字节写入文件 |
-| `--force` | 否 | `--rtt start` 时强制清理已占用的 JLinkRTTLogger |
+| `--force` | 否 | **强行走过占用检查**。`--rtt start`：清理已占用的 JLinkRTTLogger；`--rtt snapshot`：忽略检测到的 RTTViewer/Logger/GDBServer 占用，继续采集（结果可能不完整）|
+| `--no-consume` | 否 | `--rtt snapshot` **只读采集**，不把 RdOff 推进到已读位置。默认会推进——不推进时目标侧缓冲写满后会静默丢弃后续日志（`NO_BLOCK_SKIP`），`BLOCK_IF_FIFO_FULL` 模式下更会把目标锁死 |
 | `--map` | 否 | 显式指定 .map 符号文件 |
 | `--run-ms` | 否 | `--bp` 运行毫秒数（默认 2000） |
 | `--count` | 否 | `--mem` 读取字数（默认 4） |
@@ -205,11 +264,14 @@ _TimeCount_10ms        0x20020228   Data          size=4   ehtimer.o(.data)
    ⚠️ 不要因为「本类设备可能有看门狗」就不敢做非侵入调试 —— `savebin` 后台读与
    `--mem --no-halt` / `--rtt snapshot` **根本不 halt**，与看门狗无关，是取证的主力通道。
 2. **RTT 取历史用 `snapshot`**：`--rtt start` 必须**先于复位**才抓得到启动日志；测试已经跑完
-   想回读、或复现偶发问题，用 `--rtt snapshot`（见上方三方式对比表）。
+   想回读、或复现偶发问题，用 `--rtt snapshot`（见上方三方式对比表）。它读走即推进 RdOff
+   （要留存加 `--out`），细节见「RTT 是单消费者缓冲」一节。
 3. **符号歧义**：模糊匹配可能命中多个符号（如 `Display` → 6 个），先用 `--resolve` 核对再下断点。
 4. **断点上限**：J-Link 硬件断点约 6 个，设置过多会失败。
-5. **「无法连接目标」先查占用**：残留的 `JLinkRTTLogger` / `JLinkGDBServerCL` / Keil 会独占
-   J-Link，现象与「探针没插/芯片没供电」完全一样。工具在连接失败时会自动列出可疑进程。
+5. **「无法连接目标」先查占用**：`JLinkRTTViewer` / `JLinkRTTLogger` / `JLinkGDBServerCL` /
+   Keil 都会独占 J-Link，现象与「探针没插/芯片没供电」完全一样。工具在连接失败时会自动列出
+   可疑进程。（Keil 仅在调试会话进行中占用。）
+   `--rtt snapshot` 更把这一步**提到了采集之前**：开跑前就扫描并阻断，不再等失败才发现。
 6. **gdb 源码级调试**：已随 GNU Arm Toolchain 14.2 安装（`D:\ruanjian\arm-gnu-toolchain\bin`，已入用户 PATH）。未检测到时自动降级提示，`--bp/--mem/--regs` 不受影响。
 7. **VFP 寄存器警告**：Cortex-M4F 的 gdb 读到 fpscr 后尝试读浮点扩展寄存器（s0-s31）时，JLink GDBServer 响应解析会报 `Expected an decimal digit`——**无害**，核心寄存器（pc/lr/sp/xpsr/r0-r12）已全部正确读出，可忽略。
 8. **gdb + GDBServer 的两个坑**：
@@ -226,11 +288,21 @@ _TimeCount_10ms        0x20020228   Data          size=4   ehtimer.o(.data)
 | 错误 | 原因 | 解决方案 |
 |------|------|----------|
 | 未找到 JLink.exe | 工具路径未注册 | 运行 `/ea setup` 注册，或 `--jlink` 指定路径 |
-| 无法连接目标 | 调试器未接/芯片供电/**被占用** | 先看工具列出的占用进程，再查 USB/供电，关闭 Keil 调试 |
+| 无法连接目标 | 调试器未接/芯片供电/**被占用** | 先看工具列出的占用进程，再查 USB/供电；关掉 RTTViewer 窗口 / Keil 调试 |
+| RTTViewer 开着时 snapshot 失败或取不到历史 | RTTViewer 独占探针且已排空 `RdOff` | 关掉 RTTViewer 再 `--rtt snapshot`（见「不要和 JLinkRTTViewer 同时开」）|
+| `--rtt start` 期间 `--rtt snapshot` / `--bp` / `--mem` 连不上 | `JLinkRTTLogger.exe` 与 `JLink.exe` **不能同时占用探针** | 先 `--rtt stop`。要取证就 `--rtt snapshot` 一条路走到底 |
+| `--rtt snapshot` 开跑即中止并列出占用 PID | 采集前的占用检查命中 | 关掉列出的进程后重试；确认要带病采集加 `--force` |
 | RTT 日志有 `�` 乱码 | 编码不符（Keil 多为 GBK）| `--encoding gbk`（或保持默认 `auto`）|
 | 拿不到已发生的 RTT 日志 | 用了 `--rtt start`（只能抓新数据）| 改用 `--rtt snapshot` |
-| RTT 取不到数据 / 控制块校验不过 | `_SEGGER_RTT` 地址不对 | `--list-symbols _SEGGER_RTT` 核对；或 `--cb-addr` 指定 |
+| 快照报「**连接失败**：JLink 未返回任何数据」| 探针被占用 / USB / 供电 —— **与地址无关** | 查占用进程，再查 USB、芯片供电、SWD 接线 |
+| 快照报「**地址无效**：…不是 SEGGER_RTT_CB」| `_SEGGER_RTT` 地址不对 —— **与探针无关** | `--list-symbols _SEGGER_RTT` 核对；或 `--cb-addr` 指定 |
+| 快照报「环形缓冲为空」| 被其它 RTT 读取端取空，或目标尚未输出 | 工具会指明是哪种；前者需关掉 RTTViewer |
+| 快照报「RTT 未初始化」/「控制块字段不合理」| 目标未调 `SEGGER_RTT_Init`，或地址错位 | 确认固件已初始化 RTT；核对地址 |
 | RTT 采样报「疑似丢失」 | `--interval` 太长、输出太快 | 缩短 `--interval` |
+| 快照报「环形缓冲已占用 N/M B（接近写满）」 | 缓冲快满，日志正在被丢 | 工具默认会推进 RdOff 解掉；若是 `--no-consume`，去掉该参数 |
+| 日志到某一轮**突然不再更新**（WrOff 冻结） | 环形缓冲写满，目标按 `NO_BLOCK_SKIP` 丢弃日志 | **这不是目标卡死**，目标仍在正常跑。工具默认已推进 RdOff；确认没用 `--no-consume` |
+| 目标「死机/跑飞」，复位后又能跑 | `BLOCK_IF_FIFO_FULL` 下 RdOff 无人推进 → `SEGGER_RTT_Write` 自旋锁死 | 用 `--rtt snapshot` 看 `Flags` 确证；本工具默认会推进 RdOff 解除自旋 |
+| 快照报「RdOff 写回未生效」/「收尾写回失败」 | `w4` 没生效（RTT 被重新初始化 / 目标复位 / 写保护）| 目标仍在丢日志或锁死自旋。重跑一次；长期看改用 `--rtt start` 让 Logger 当正规 RTT 主机 |
 | 采样打断了交互测试 | 用了默认 `--mem`（halt→读→go）| 加 `--no-halt` |
 | 找不到符号 | 无 .map 或名字不符 | `--list-symbols` 查看，`--map` 指定文件 |
 | halt 后复位 | IWDG 未被调试冻结 | 确认 `DBG_IWDG_STOP`；缩短 `--run-ms`；或改 `--mem --no-halt` |

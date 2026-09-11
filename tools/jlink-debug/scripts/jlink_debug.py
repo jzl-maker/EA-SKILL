@@ -21,6 +21,11 @@
 `savebin` 走 AHB-AP 后台访问，目标全速运行时亦可读写 RAM。`--rtt snapshot` 与
 `--mem --no-halt` 即建立在此之上，是「目标正在跑人工测试时取证据」的唯一可靠通道。
 
+`--rtt snapshot` **唯一会写目标**的地方是把 RTT 控制块的 `RdOff` 推进到已读位置
+（`w4` 后台写，同样不 halt）。RTT 是单消费者环形缓冲，读取端不推进 RdOff 的后果见
+`rtt_drain()` 的注释 —— 轻则后续日志被目标静默丢弃，重则把目标锁死在自旋里。
+`--no-consume` 可退回纯只读（但那两种后果随之而来）。
+
 零第三方依赖：只调用 J-Link / OpenOCD 可执行文件。
 """
 
@@ -79,14 +84,40 @@ MAX_CAPTURE_BYTES = 8 << 20
 RTT_CB_PROBE = 0x40
 RTT_CB_ID = b"SEGGER RTT"
 # SEGGER_RTT_CB 中 aUp[0] 的字段偏移（相对控制块起始）
+# aUp[0]: sName*(+0) pBuffer*(+4) SizeOfBuffer(+8) WrOff(+12) RdOff(+16) Flags(+20)
+# RdOff 在**控制块里**（不是环形缓冲里）——写回时地址是 cb_addr + 40，不是 pBuffer。
 RTT_AUP_OFFSET = 24
-# 会独占 J-Link 的进程：连不上目标时按此排查，避免误判成硬件问题
-JLINK_OCCUPYING_IMAGES = (
+RTT_AUP_RD_OFFSET = RTT_AUP_OFFSET + 16
+RTT_AUP_FLAGS_OFFSET = RTT_AUP_OFFSET + 20
+# 上行缓冲工作模式（SEGGER_RTT.h 中 Flags 低 2 位）。决定"环形缓冲写满时目标怎么办"：
+#   0 NO_BLOCK_SKIP      写不下就丢弃本次写入，目标照常跑 —— 静默丢日志，最隐蔽
+#   1 NO_BLOCK_TRIM      写不下就截断本次写入，目标照常跑
+#   2 BLOCK_IF_FIFO_FULL 自旋等待 RdOff 推进 —— 无人推进则**目标永久卡死**
+# 前两种丢的是证据，第三种丢的是整个目标（现象类同死机/跑飞，极易误判为软件 bug）。
+RTT_MODE_NAMES = {0: "NO_BLOCK_SKIP", 1: "NO_BLOCK_TRIM", 2: "BLOCK_IF_FIFO_FULL"}
+RTT_MODE_BLOCKING = 2
+# 占用超过此比例就提示"缓冲接近写满"。给不出精确的"满"判据：SEGGER 是在**下一次
+# 写入放不下时**才停止推进 WrOff，所以 WrOff 会停在任意位置（实测 2048B 缓冲停在
+# 2046，还剩 1 字节余量），并非停在 size-1。只能按比例提示。
+RTT_FULL_WARN_RATIO = 0.9
+# 会**消费** RTT 环形缓冲的进程。它们不只独占探针，还会持续推进 RdOff 把缓冲读空，
+# 使 savebin 直读取不到已被消费的历史——比单纯"占用探针"更隐蔽。
+RTT_CONSUMER_IMAGES = (
+    "JLinkRTTViewer.exe",
     "JLinkRTTLogger.exe",
+    "JLinkRTTClient.exe",
+)
+# 会独占 J-Link 的进程：连不上目标时按此排查，避免误判成硬件问题。
+# JLinkRTTViewer 是 GUI 窗口，用户常常不认为它"占着探针"，但它确实是探针独占者之一。
+JLINK_OCCUPYING_IMAGES = RTT_CONSUMER_IMAGES + (
     "JLinkGDBServerCL.exe",
+    "JLinkGDBServer.exe",
     "JLink.exe",
     "UV4.exe",
 )
+# `--rtt snapshot` 开跑前的硬阻断名单。排除 UV4：Keil 仅在调试会话进行中才占用探针，
+# 把它算进去会在用户只是开着 Keil 时误伤，反而挡住正常取证。
+RTT_BLOCKING_IMAGES = tuple(i for i in JLINK_OCCUPYING_IMAGES if i != "UV4.exe")
 SAVEBIN_TIMEOUT = 40
 
 # OpenOCD 后端
@@ -487,19 +518,34 @@ def run_commander(
             pass
 
 
+def scan_occupying_processes(
+    images: tuple[str, ...] = JLINK_OCCUPYING_IMAGES,
+) -> dict[str, list[int]]:
+    """扫描正在占用 J-Link 的进程，返回 {镜像名: [PID]}（只含命中的）。"""
+    hit = {img: list_pids(img) for img in images}
+    return {img: pids for img, pids in hit.items() if pids}
+
+def print_occupying_processes(hit: dict[str, list[int]]) -> None:
+    """打印占用进程清单；对 RTT 读取端额外说明它还会排空环形缓冲。"""
+    for img, pids in hit.items():
+        note = "（仅调试会话进行中才占用，未调试可忽略）" if img == "UV4.exe" else ""
+        print(f"      {img}  PID {', '.join(map(str, pids))} {note}".rstrip())
+    if any(img in RTT_CONSUMER_IMAGES for img in hit):
+        print("      ℹ️ RTTViewer / Logger / Client 是正规 RTT 主机：不只抢探针，")
+        print("         还会持续推进 RdOff 把环形缓冲读空——它们读走的历史，")
+        print("         事后用 savebin 直读也取不回来了。")
+
 def diagnose_connect_failure(output: str) -> None:
     """连接失败时排查「J-Link 被占用」，避免误判为硬件问题。
 
     残留的 RTTLogger / GDBServer / Keil 会独占 J-Link，此时任何 --bp/--mem/--regs
     都报「无法连接目标」，与探针没插、芯片没供电的现象完全一样。
     """
-    hit = [img for img in JLINK_OCCUPYING_IMAGES if list_pids(img)]
+    hit = scan_occupying_processes()
     print("🔎 连接失败排查：")
     if hit:
-        print(f"   ⚠️ 检测到可能独占 J-Link 的进程：{', '.join(hit)}")
-        for img in hit:
-            pids = list_pids(img)
-            print(f"      {img}  PID {', '.join(map(str, pids))}")
+        print("   ⚠️ 检测到可能占用 J-Link 的进程（探针一次只允许一个进程连接）：")
+        print_occupying_processes(hit)
         print("      先关掉上面这些（或 --rtt stop）再重试")
     else:
         print("   ✅ 无占用进程 → 检查 USB 连接、芯片供电、SWD 接线")
@@ -612,6 +658,7 @@ def _run_savebin(
     interface: str,
     speed: int,
     timeout: int = SAVEBIN_TIMEOUT,
+    prelude: list[str] | None = None,
 ) -> dict[str, bytes]:
     """批量 savebin 读 RAM，返回 {文件名: 内容}（读取失败的文件不出现）。
 
@@ -621,13 +668,18 @@ def _run_savebin(
 
     specs 里的地址/长度经命令行传给 savebin；脚本只含 savebin 行 + `qc`，
     连接由命令行 `-AutoConnect 1` 完成。
+
+    `prelude` 是要排在 savebin **之前**执行的裸 Commander 命令（目前只有写回
+    RdOff 的 `w4`）。放进同一次连接可以省掉一次 JLink 启动（约 1-2s）——轮询
+    采集时这笔开销按次数翻倍，不能忽略。
     """
     tmpdir = Path(tempfile.mkdtemp(prefix="ea_rtt_"))
     try:
         if " " in str(tmpdir):
             print(f"⚠️ 临时目录含空格，savebin 可能写入失败: {tmpdir}")
-        lines = [f"savebin {tmpdir / name} 0x{addr:08X} 0x{size:X}"
-                 for name, addr, size in specs]
+        lines = [*(prelude or []),
+                 *(f"savebin {tmpdir / name} 0x{addr:08X} 0x{size:X}"
+                   for name, addr, size in specs)]
         try:
             run_commander(jlink_exe, "\n".join(lines) + "\nqc\n", timeout=timeout,
                           device=device, interface=interface, speed=speed)
@@ -806,6 +858,21 @@ def extract_ring(buf: bytes, size: int, wr: int, rd: int) -> bytes:
         return buf[rd:wr]
     return buf[rd:] + buf[:wr]
 
+def rtt_used(size: int, wr: int, rd: int) -> int:
+    """环形缓冲中当前可读字节数 [rd, wr)。空时为 0，接近写满时趋近 size-1。"""
+    return (wr - rd) % size if size > 0 else 0
+
+
+def rd_off_cmd(cb_addr: int, value: int) -> str:
+    """写回 RdOff 的 Commander 命令（搭车轮询与收尾写回共用同一处拼装）。"""
+    return f"w4 0x{cb_addr + RTT_AUP_RD_OFFSET:08X} 0x{value & 0xFFFFFFFF:08X}"
+
+
+def is_near_full(used: int, size: int) -> bool:
+    """缓冲是否接近写满（为什么只能按比例、给不出精确判据：见 RTT_FULL_WARN_RATIO）。"""
+    return size > 1 and used >= (size - 1) * RTT_FULL_WARN_RATIO
+
+
 def rtt_sample(
     jlink_exe: str,
     cb_addr: int,
@@ -813,39 +880,101 @@ def rtt_sample(
     interface: str,
     speed: int,
     known: tuple[int, int] | None = None,
-) -> dict[str, Any] | None:
+    consume_wr: int | None = None,
+) -> dict[str, Any]:
     """一次 savebin 抓取 RTT 状态。
 
     `known=(pBuffer, SizeOfBuffer)` 时把控制块与缓冲**放在同一个脚本里一次读完**
     （每次采集只启动一次 JLink，约 1-2 秒）。缓冲若已被目标重配，本轮返回的
     `pbuf/size` 与 known 不符，调用方据此丢弃本轮并在下轮按新地址重取。
+
+    `consume_wr=<上一轮读到的 WrOff>` 时，把写回 RdOff 的 `w4` 排在 savebin **之前**
+    （见 `_run_savebin` 的 prelude 参数）——写的是上一轮**已经读走**的那段，不会
+    吃掉本轮要读的数据。放在前面是为了尽早释放缓冲空间：savebin 要搬运整个环缓冲，
+    耗时以百毫秒计，把 w4 放到后面就等于让缓冲多满这么久。
+
+    失败时返回 `{"error": <原因>}`。**原因必须区分开**：`no-read` 是连不上探针
+    （去查占用进程 / 接线），`cb-id` / `bad-ctrl` 是地址错（去查符号表）——两者
+    排查方向完全相反，此前合并成一句「读取无效」会让 AI 查错方向。
     """
     specs = [("cb.bin", cb_addr, RTT_CB_PROBE)]
     if known:
         specs.append(("up.bin", known[0], known[1]))
-    got = _run_savebin(jlink_exe, specs, device, interface, speed)
+    prelude = None
+    if consume_wr is not None:
+        prelude = [rd_off_cmd(cb_addr, consume_wr)]
+    got = _run_savebin(jlink_exe, specs, device, interface, speed, prelude=prelude)
     # 区分「本轮没请求缓冲」与「请求了但读失败」——前者应立刻重取，后者不该死循环
     requested = known is not None
 
     cb = got.get("cb.bin")
-    if cb is None or cb[:len(RTT_CB_ID)] != RTT_CB_ID:
-        return None                      # ID 校验：挡住 savebin 错位读出的垃圾
+    if cb is None:
+        # 一个文件都没产出：连接层面失败，与地址无关
+        return {"error": "no-read"}
+    if cb[:len(RTT_CB_ID)] != RTT_CB_ID:
+        # 读到了 RAM，但内容不是控制块 → 地址错（与探针无关）
+        return {"error": "cb-id", "head": cb[:len(RTT_CB_ID)]}
     num_up, num_down = struct.unpack_from("<II", cb, 16)
     if num_up < 1:
-        return None                      # 未分配上行缓冲（RTT 未初始化）
+        return {"error": "not-init", "num_up": num_up}   # RTT 未初始化
     # SEGGER_RTT_CB: acID[16] + NumUp(4) + NumDown(4) = 24，aUp[0] 紧随其后
-    # aUp[0]: sName*(4) pBuffer*(4) SizeOfBuffer(4) WrOff(4) RdOff(4) Flags(4)
     pbuf, size, wr, rd = struct.unpack_from("<IIII", cb, RTT_AUP_OFFSET + 4)
     if pbuf == 0 or not (0 < size <= (1 << 20)):
-        return None                      # 指针/长度不合理 → 判为无效读
+        return {"error": "bad-ctrl", "pbuf": pbuf, "size": size}
+    flags = struct.unpack_from("<I", cb, RTT_AUP_FLAGS_OFFSET)[0]
     return {"pbuf": pbuf, "size": size, "wr": wr, "rd": rd, "num_up": num_up,
-            "num_down": num_down, "buf": got.get("up.bin"), "requested": requested}
+            "num_down": num_down, "flags": flags, "mode": RTT_MODE_NAMES.get(flags & 0x3),
+            "used": rtt_used(size, wr, rd),
+            "buf": got.get("up.bin"), "requested": requested}
+
+def rtt_drain(
+    jlink_exe: str,
+    cb_addr: int,
+    wr: int,
+    device: str,
+    interface: str,
+    speed: int,
+) -> tuple[bool, int | None]:
+    """把 RdOff 推进到 `wr`，并**在同一次连接里回读校验**。返回 (是否生效, 回读到的值)。
+
+    为什么必须推进（RTT 是**单消费者**环形缓冲，读取端读走 `[RdOff, WrOff)` 后
+    有责任推进 RdOff，否则目标侧空间不释放）：
+
+    - `Flags=NO_BLOCK_SKIP/TRIM`：WrOff 停在缓冲写满处不再前进，**后续所有
+      `SEGGER_RTT_printf` 被目标静默丢弃**。表象是"目标没日志了/像卡住"，实际目标
+      在正常跑；而本工具此时也只会一遍遍读到同样的字节，看起来"采集正常"。
+    - `Flags=BLOCK_IF_FIFO_FULL`：`SEGGER_RTT_Write` 自旋等 RdOff 推进。没人推进 →
+      **目标永久锁死在该自旋里**，外部现象与死机/跑飞无法区分。
+
+    两者都源于「读取端只读不推进」，而 JLinkRTTViewer/Logger 这类正规 RTT 主机
+    是会推进的 —— 只有本工具这种直读 RAM 的取证方式需要自己补上这一步。
+
+    安全性：写的是控制块里的 32 位字段（cb_addr + 40），不是环形缓冲本身。写的值是
+    目标**已经发布过**的 WrOff，目标侧只需保证 WrOff 只增；读取者按 `[RdOff, WrOff)`
+    取数，因此不会读到半截数据。`w4` 走 AHB-AP 后台写，不 halt CPU。
+    """
+    lines = [rd_off_cmd(cb_addr, wr)]
+    # 回读用同一个脚本：w4 执行完紧接着 savebin，写失败能从回读值看出来，
+    # 不用去猜 Commander 的文本输出（它的正常 banner 里也含 "Error" 之类字样）
+    got = _run_savebin(jlink_exe, [("rd.bin", cb_addr, RTT_CB_PROBE)],
+                       device, interface, speed, prelude=lines)
+    cb = got.get("rd.bin")
+    if cb is None:
+        return False, None
+    now = struct.unpack_from("<I", cb, RTT_AUP_RD_OFFSET)[0]
+    return now == wr % (1 << 32), now
 
 def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
     """`--rtt snapshot`：直读 RAM 环形缓冲，取回**已发生**的 RTT 输出（含历史）。
 
     与 JLinkRTTLogger / GDBServer telnet 的区别：后两者只能拿 attach 之后的新数据，
     且高吞吐时会随机丢行；savebin 逐字节精确，是唯一可用于取证的方式。
+
+    **但"只读"本身有代价**：RTT 是单消费者环形缓冲，正规 RTT 主机（RTTViewer/Logger）
+    读走 `[RdOff, WrOff)` 后会推进 RdOff 把空间还给目标，而 savebin 直读不会。若不补
+    这一步，缓冲写满后目标要么静默丢弃后续日志（NO_BLOCK_SKIP），要么自旋等 RdOff
+    而**永久锁死**（BLOCK_IF_FIFO_FULL）—— 后者表象与死机无异，是比丢日志严重得多
+    的事故。故采集后默认写回 `RdOff = WrOff`（`--no-consume` 可关闭，代价见上）。
     """
     jlink_exe, _ = find_jlink(args.jlink)
     if not jlink_exe:
@@ -878,11 +1007,27 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
         print("(dry-run) savebin 采集计划：")
         print(f"  1) savebin cb.bin 0x{cb_addr:08X} 0x{RTT_CB_PROBE:X}"
               f"   → 校验 cb[0:10]=='SEGGER RTT'")
-        print("  2) 取 aUp[0] 的 pBuffer / SizeOfBuffer / WrOff / RdOff")
+        print("  2) 取 aUp[0] 的 pBuffer / SizeOfBuffer / WrOff / RdOff / Flags")
         print("  3) savebin up.bin <pBuffer> <SizeOfBuffer>  → 按 WrOff 取 [rd, wr)")
+        print(f"  4) w4 0x{cb_addr + RTT_AUP_RD_OFFSET:08X} <WrOff>"
+              "  → 推进 RdOff，释放目标侧空间"
+              + ("（--no-consume 时跳过）" if not getattr(args, "consume", True) else ""))
         print(f"  JLink: -Device {args.device} -If {args.interface} -Speed {args.speed} "
               f"-AutoConnect 1 -ExitOnError 1   （connect 不复位、不 halt）")
         return 0
+
+    # 开跑前扫描占用进程。RTTViewer/Logger 不只抢探针，还会把环形缓冲读空 —— 那样
+    # 本轮会拿到 0 字节却"正常完成"，静默丢证据。必须在采集前拦住，不能等事后。
+    busy = scan_occupying_processes(RTT_BLOCKING_IMAGES)
+    if busy:
+        print("⚠️ 检测到正在占用 J-Link 的进程（探针一次只允许一个进程连接）：")
+        print_occupying_processes(busy)
+        if not args.force:
+            print("   ❌ 已中止采集。上述进程会抢占连接，并且可能已把环形缓冲读空，")
+            print("      本次快照大概率只得到 0 字节。")
+            print("      → 关闭它们后重试；确认要带病采集请加 --force")
+            return 1
+        print("   ⚠️ --force：继续采集，但历史可能已被消费，结果不保证完整")
 
     if args.reset_run:
         if do_reset_run(jlink_exe, args.device, args.interface, args.speed, False) != 0:
@@ -897,15 +1042,29 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
     if duration is None and poll_max is None:
         poll_max = 1                       # 缺省单次快照
 
-    print(f"📡 采集方式: savebin 直读 RAM（不 halt、不复位，对目标零干扰）")
+    consume = getattr(args, "consume", True)
+    print(f"📡 采集方式: savebin 直读 RAM（不 halt、不复位）")
     if poll_max == 1:
         print("   单次快照 → 取回环形缓冲中全部未读数据")
     else:
         print(f"   轮询：间隔 {interval}s"
               + (f"，持续 {duration}s" if duration else f"，共 {poll_max} 次"))
+    if consume:
+        print("   ↩ 采集后把 RdOff 推进到已读位置（w4 后台写，同样不 halt）——")
+        print("     不推进时缓冲写满会让目标丢弃后续日志，BLOCKING 模式下甚至把目标锁死")
+    else:
+        print("   ⚠️ --no-consume：只读采集，不推进 RdOff。目标若在采集期间写满环形缓冲，")
+        print("      超出部分会被**静默丢弃**；Flags=BLOCK_IF_FIFO_FULL 时目标会被锁死在自旋里")
 
     known: tuple[int, int] | None = None
     last_wr: int | None = None
+    last_rd: int | None = None
+    last_mode: str | None = None
+    pending_rd: int | None = None   # 下一轮要写回的 RdOff（其数据已被本工具取走）
+    expect_rd: int | None = None    # 已写回的值，下一轮读回来校验是否真的生效
+    drain_failed = False
+    said_full = False
+    said_idle = False
     chunks: list[bytes] = []
     lost_bytes = 0
     iteration = 0
@@ -914,9 +1073,30 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
     while True:
         iteration += 1
         s = rtt_sample(jlink_exe, cb_addr, args.device, args.interface,
-                       args.speed, known)
-        if s is None:
-            print(f"   [{iteration}] ⚠️ 读取无效（连接失败 / 控制块校验不过），跳过本轮")
+                       args.speed, known, consume_wr=pending_rd)
+        err = s.get("error")
+        if err is None and pending_rd is not None:
+            # w4 与本次 savebin 在同一脚本里：脚本正常回来即已执行。写成功与否不靠
+            # Commander 的文本输出判断（其 banner 里本身就含 "Error" 字样），改由
+            # 下一轮读回的 RdOff 校验 —— 见下方 expect_rd 检查。
+            expect_rd, pending_rd = pending_rd, None
+        if err == "no-read":
+            # 连接层面：与地址无关，别让 AI 去翻符号表
+            print(f"   [{iteration}] ⚠️ 连接失败：JLink 未返回任何数据（探针被占用 / USB / 供电）")
+            print("      排查 → 是否有其它进程占用 J-Link（RTTViewer/Logger/GDBServer/Keil 调试），"
+                  "再查 USB、芯片供电、SWD 接线")
+        elif err == "cb-id":
+            # 地址层面：与探针无关，别让 AI 去查进程
+            print(f"   [{iteration}] ⚠️ 地址无效：0x{cb_addr:08X} 处不是 SEGGER_RTT_CB"
+                  f"（读到 {s['head']!r}）")
+            print("      排查 → 地址错，与探针/接线无关：核对 .map 的 _SEGGER_RTT，"
+                  "或用 --cb-addr 显式指定")
+        elif err == "not-init":
+            print(f"   [{iteration}] ⚠️ RTT 未初始化：NumUp={s['num_up']}"
+                  "（目标未调用 SEGGER_RTT_Init，或已 deinit）")
+        elif err == "bad-ctrl":
+            print(f"   [{iteration}] ⚠️ 控制块字段不合理：pBuffer=0x{s['pbuf']:08X} "
+                  f"SizeOfBuffer={s['size']}（RTT 未初始化 / 地址错位）")
         elif not s["requested"]:
             # 尚未知道缓冲地址：本轮只拿到控制块，登记后立即重取（不占用采样次数）
             known = (s["pbuf"], s["size"])
@@ -931,9 +1111,32 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
             known = None
         else:
             size, wr, buf = s["size"], s["wr"], s["buf"]
+            used = s["used"]
+            if not said_full and is_near_full(used, size):
+                # 只在接近写满时说一次，否则每轮都刷模式信息太吵
+                said_full = True
+                print(f"   [{iteration}] ⚠️ 环形缓冲已占用 {used}/{size - 1}B（接近写满）")
+                if s["flags"] & 0x3 == RTT_MODE_BLOCKING:
+                    print("      Flags=BLOCK_IF_FIFO_FULL → 缓冲写满后 SEGGER_RTT_Write 会自旋等")
+                    print("      RdOff 推进；无人推进则**目标被锁死**，现象类同死机/跑飞，"
+                          "极易误判为软件 bug")
+                else:
+                    print(f"      Flags={s['mode']} → 写不下就丢弃，目标自身照常在跑，"
+                          "但**期间的日志已经丢了**（本工具拿到的历史是残缺的）")
+                print("      → 本次采集会推进 RdOff，此后不再因写满而丢日志/锁死"
+                      if consume else
+                      "      → --no-consume 下这条风险无法解除，去掉该参数即可")
             if last_wr is None:
                 new = extract_ring(buf, size, wr, s["rd"])       # 首轮：取全部可用历史
                 tag = f"历史 {len(new)}B"
+                if not new:
+                    # 空缓冲有两种成因，排查方向相反，必须分开说 —— 合并成"没日志"会误导
+                    print(f"   [{iteration}] ⚠️ 环形缓冲为空 (wr == rd == {wr})，未取到任何日志")
+                    if any(img in RTT_CONSUMER_IMAGES for img in busy):
+                        print("      → 已被其它 RTT 读取端取空（见上方占用清单）：它们每读一次即推进 RdOff，")
+                        print("        本工具只能拿到「两次采样之间」的新增数据，取不回已被消费的历史。")
+                    else:
+                        print(f"      → 目标尚未通过 RTT 输出，或日志已被覆盖整圈（缓冲仅 {size}B）")
             else:
                 delta = (wr - last_wr) % size
                 if delta == 0:
@@ -948,13 +1151,32 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
                     lost_bytes += delta
                     print(f"   [{iteration}] ⚠️ 两次采样间近似写满整圈"
                           f"({delta}/{size}B) → 可能有丢行，缩短 --interval")
-            last_wr = wr
+            last_wr, last_rd, last_mode = wr, s["rd"], s["mode"]
+            if expect_rd is not None and s["rd"] != expect_rd:
+                # 写回没生效（目标只读保护 / RTT 被重新初始化）。不报的话用户会以为
+                # 缓冲已被清空，而目标其实还在丢日志、甚至锁在自旋里 —— 正是本次
+                # 要修的"静默失效"，不能在修法自己身上再犯一次。
+                drain_failed = True
+                # 只报事实；后果与处置统一放在收尾一次说清，免得同一件事讲三遍
+                print(f"   [{iteration}] ⚠️ RdOff 写回未生效：期望 {expect_rd}，读到 {s['rd']}")
+            expect_rd = None
+            if consume:
+                pending_rd = wr          # 本轮这段已经读走，下一轮开头写回
             if new:
                 chunks.append(new)
                 print(f"   [{iteration}] wr={wr}  {tag}")
                 if not args.json:
                     print("      | " + _decode_log(new, enc).rstrip()
                           .replace("\n", "\n      | "))
+            elif tag == "无新增" and not said_idle:
+                # 首次无新增说一次就好（长时轮询每轮都刷太吵）。不能说都不说：
+                # WrOff 冻结时每轮都无新增，静默会让"目标丢了日志"看起来像"一切正常"
+                # ——这正是本次要修的静默失效。
+                said_idle = True
+                print(f"   [{iteration}] wr={wr}  无新增（目标尚未输出新日志）")
+                if is_near_full(used, size):
+                    print("      ⚠️ 且缓冲已接近写满 → 目标很可能正在丢弃日志，"
+                          "而不是没有输出")
 
         if deadline is not None:
             if time.time() >= deadline:
@@ -966,11 +1188,38 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
                 break
             time.sleep(interval)
 
+    # 收尾推进：最后一次读到的那段还没写回。**单次快照走的正是这条路** —— 它读完
+    # 立即 break，没有"下一轮"可以搭车；只在循环里做写回的话，最常用的取证方式
+    # 反而永远不释放缓冲。这里补一次独立写回（带回读校验）。
+    if consume and pending_rd is not None:
+        ok, now = rtt_drain(jlink_exe, cb_addr, pending_rd,
+                            args.device, args.interface, args.speed)
+        if ok:
+            print(f"   ↩ RdOff 已推进到 {pending_rd}（目标侧缓冲空间已释放）")
+        else:
+            drain_failed = True
+            print(f"   ⚠️ RdOff 收尾写回失败：期望 {pending_rd}，回读 {now}")
+
     data = b"".join(chunks)
     text = _decode_log(data, enc)
     print("─" * 60)
-    print(f"✅ RTT 快照完成：{len(data)} 字节 / {len(text.splitlines())} 行"
-          + (f"（⚠️ 疑似丢失 {lost_bytes} 字节）" if lost_bytes else ""))
+    if drain_failed:
+        # 三处检测（循环内 / 收尾写回 / 此处）共用这一段解释 —— 后果与处置只讲一次
+        print("⚠️ RdOff 写回未生效：目标侧缓冲未被释放。后续日志可能仍在被丢弃"
+              "（Flags=NO_BLOCK_SKIP）或目标仍锁在自旋里（Flags=BLOCK_IF_FIFO_FULL）")
+        print("   → 检查 RTT 是否被重新初始化 / 目标是否已复位；"
+              "长期采集改用 --rtt start，让 JLinkRTTLogger 当正规 RTT 主机")
+    if data:
+        print(f"✅ RTT 快照完成：{len(data)} 字节 / {len(text.splitlines())} 行"
+              + (f"（⚠️ 疑似丢失 {lost_bytes} 字节）" if lost_bytes else ""))
+    else:
+        # 0 字节不能报 ✅ —— 取证场景下"看起来成功但没证据"比报错更危险
+        print("⚠️ RTT 快照未取到任何数据（0 字节）")
+        if any(img in RTT_CONSUMER_IMAGES for img in busy):
+            print("   原因：环形缓冲已被其它 RTT 读取端取空（见上方占用清单）")
+            print("   → 关掉 RTTViewer/Logger/Client 后重新复现，再跑 --rtt snapshot")
+        else:
+            print("   原因：目标未通过 RTT 输出，或采样时机全落在无输出窗口")
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -979,7 +1228,10 @@ def do_rtt_snapshot(args: Any, symbols: dict[str, dict[str, Any]]) -> int:
     if args.json:
         print(json.dumps({"cb_addr": f"0x{cb_addr:08X}", "bytes": len(data),
                           "lines": len(text.splitlines()), "lost": lost_bytes,
-                          "encoding": enc, "text": text}, ensure_ascii=False))
+                          "encoding": enc, "consume": consume,
+                          "drain_failed": drain_failed, "wr": last_wr,
+                          "rd": last_rd, "rtt_mode": last_mode, "text": text},
+                         ensure_ascii=False))
     return 0
 
 # ---------------------------------------------------------------------------
@@ -1394,7 +1646,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="RTT 日志解码（默认 auto=先试 UTF-8 再回落 GBK；可指定 gbk/utf-8）")
     parser.add_argument("--out", metavar="<文件>", help="--rtt snapshot 把原始字节写入文件")
     parser.add_argument("--force", action="store_true",
-                        help="--rtt start 时强制清理已占用的 JLinkRTTLogger")
+                        help="强行走过占用检查：--rtt start 清理残留 JLinkRTTLogger；"
+                             "--rtt snapshot 忽略 RTTViewer/Logger/GDBServer 占用继续采集")
+    parser.add_argument("--no-consume", dest="consume", action="store_false",
+                        help="--rtt snapshot 只读采集，不把 RdOff 推进到已读位置。"
+                             "默认会推进——不推进时目标侧环形缓冲写满后会静默丢弃后续"
+                             "日志（NO_BLOCK_SKIP），BLOCKING 模式下更会把目标锁死")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help=f"芯片型号（默认 {DEFAULT_DEVICE}）")
     parser.add_argument("--if", dest="interface", default=DEFAULT_INTERFACE, help=f"接口（默认 {DEFAULT_INTERFACE}）")
     parser.add_argument("--speed", type=int, default=DEFAULT_SPEED, help=f"SWD 速度 kHz（默认 {DEFAULT_SPEED}）")
