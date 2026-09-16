@@ -34,6 +34,7 @@ from common import (
     add_common_args,
     check_logic2_port,
     default_output_dir,
+    diagnostics_to_stderr,
     emit_json,
     find_logic2_exe,
     parse_value,
@@ -843,15 +844,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.load and args.trigger_channel is not None:
         print("  ⚠️  --trigger-channel 对 --load 无意义（捕获已录好），本次忽略")
         args.trigger_channel = None
-    if args.detect:
-        return do_detect(args)
-    if args.list_analyzer_types:
-        return do_list_analyzer_types()
-    if args.list_devices:
-        return do_list_devices(args)
-    if args.load:
-        return do_load(args)
-    return do_capture(args)
+    # --json 时把诊断输出改道 stderr，让 stdout 只剩 emit_json 的那份 JSON。
+    # 必须套在 dispatch **之前**：do_capture / do_load 在 emit_json 之前就已经
+    # print 了设备信息、进度、产物清单（export_capture / report_artifacts 里还有
+    # 更多），老版本 stdout 是"一堆中文 + 末尾一段 JSON"，json.loads 直接失败。
+    # --dry-run 排除在外——那条路径本来就不发 JSON，输出是给人看的执行计划。
+    with diagnostics_to_stderr(args.json and not args.dry_run):
+        if args.detect:
+            return do_detect(args)
+        if args.list_analyzer_types:
+            return do_list_analyzer_types()
+        if args.list_devices:
+            return do_list_devices(args)
+        if args.load:
+            return do_load(args)
+        return do_capture(args)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -76,9 +77,41 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
+# --json 的契约是"stdout 上只有那一份 JSON"。诊断行（▶ 型号 / ⚠️ 警告 / ✅ 产物）
+# 是用 print() 直接写 stdout 的，所以 --json 时脚本必须靠 diagnostics_to_stderr()
+# 把 sys.stdout 改道到 stderr。而那道改道**只该影响诊断输出**，JSON 本身得绕开它——
+# 于是这里在模块导入期（任何改道之前）抓住真流。
+_REAL_STDOUT = sys.stdout
+
+
 def emit_json(obj: dict[str, Any]) -> None:
-    """--json 模式：只输出一份 JSON 到 stdout，供 AI 解析。"""
-    print(json.dumps(obj, ensure_ascii=False, indent=2))
+    """--json 模式：只输出一份 JSON 到 stdout，供 AI 解析。
+
+    显式写 _REAL_STDOUT：即便调用方已经用 diagnostics_to_stderr() 改道了诊断输出，
+    这份 JSON 依然落在真 stdout 上。两者必须配套使用，"stdout 里只有 JSON"才成立。
+    """
+    print(json.dumps(obj, ensure_ascii=False, indent=2), file=_REAL_STDOUT)
+
+
+@contextmanager
+def diagnostics_to_stderr(enabled: bool = True):
+    """把 print() 诊断输出改道 stderr，让 stdout 只剩 emit_json 的那份 JSON。
+
+    enabled 为假时原样放行，所以调用处可以无条件写成
+    `with diagnostics_to_stderr(args.json): ...`。
+
+    必须在**任何诊断输出之前**套上——脚本往往在 emit_json 之前就已经 print 了
+    设备信息、进度和产物清单，晚套等于没套。
+    """
+    if not enabled:
+        yield
+        return
+    saved = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = saved
 
 
 # ---------------------------------------------------------------------------

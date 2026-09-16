@@ -445,10 +445,18 @@ def t16_json_stdout_is_pure_json():
              "--vdiv", "1.0", "--json"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=td)
-    assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+    # TMC 路径也纳入 0/2 退出码契约（见 t24/t25）：平线是"取到数据但不可信"
+    assert r.returncode == 2, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
     obj = json.loads(r.stdout)  # 混进任何人类可读行这里就抛
     assert obj["points"] == 20, obj
     assert obj["sample_domain"]["flat"] is True, obj
+    # 用平线文件是有意的：警告文案也一起进输出，这条用例就同时盯住
+    # "警告没混进 stdout"和"警告确实出现在 stderr"
+    assert obj["warnings"], f"平线必须给警告：{obj}"
+    assert "平线" in r.stderr, f"警告没去 stderr：{r.stderr!r}"
+    # 盯的是**人类可读那一行**（⚠️ 前缀）没混进 stdout；警告文本本身在 JSON
+    # 的 warnings 数组里，那是应该出现的，所以不能拿"平线"两个字当判据。
+    assert "⚠️" not in r.stdout, f"人类可读行混进了 stdout：{r.stdout!r}"
 
 
 @case
@@ -534,6 +542,193 @@ def t20_ds100_short_window_warns_periods():
             rc = scope.do_parse_ds100(args)
         out = buf.getvalue()
     assert rc == 0, f"4 个周期够用，应 rc=0：{rc}\n{out}"
+
+
+# ---------------------------------------------------------------------------
+# N10 —— 占空比分布：duty_pct 是点估计，掩盖"在变"的占空比
+# ---------------------------------------------------------------------------
+
+
+def square_codes(n: int, period: int, duty=50.0) -> bytes:
+    """方波码值（HIGH=213 / LOW=135，与真机实测同一对码值）。
+
+    duty 给标量就是等占空比；给数组则必须是**逐采样**的（长度 n），用来合成
+    PWM 调光 / 软启动那种"占空比在扫"的波形。逐周期写法用
+    `duty_of_cycle[np.arange(n) // period]` 展开——注意别把逐周期的长数组
+    直接传进来，那会被当成逐采样值按下标截断（写这条用例时就踩过）。
+    """
+    idx = np.arange(n)
+    d = (np.full(n, float(duty)) if np.ndim(duty) == 0
+         else np.asarray(duty, dtype=np.float64))
+    if len(d) != n:
+        raise ValueError(f"duty 数组长度 {len(d)} != 点数 {n}（应为逐采样值）")
+    thr = (d / 100.0 * period).astype(np.int64)
+    return np.where(idx % period < thr, 213, 135).astype(np.uint8).tobytes()
+
+
+def duty_ramp(n: int, period: int, d0: float, d1: float) -> np.ndarray:
+    """占空比按**周期**从 d0 线性扫到 d1，返回逐采样数组（配合 square_codes）。"""
+    ncyc = max(1, n // period)
+    per = np.arange(n) // period
+    return d0 + (d1 - d0) * per / max(1, ncyc - 1)
+
+
+def run_tmc(codes: bytes, *extra: str):
+    """把码值写成 TMC 文件跑一遍 CLI，回 (rc, 解析后的 JSON, stderr)。"""
+    import subprocess
+    with tempfile.TemporaryDirectory(prefix="ea_scope_") as td:
+        f = write_tmc(codes, Path(td) / "w.bin")
+        r = subprocess.run(
+            [sys.executable, "-u", str(SCOPE_PY), "--parse-tmc", str(f),
+             "--vdiv", "1.0", "--xinc", "1e-6", "--json", *extra],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=td)
+    return r.returncode, json.loads(r.stdout), r.stderr
+
+
+@case
+def t21_duty_ramp_is_flagged():
+    """N10：占空比 20%→80% 线性扫，duty_pct 报的均值必须被标成不可信。
+
+    这是本轮的核心用例。老版本对这个信号给出 duty=49.75%、period_cv=0.0、
+    warnings 空——读起来就是一个稳定的 50% 方波，而实际占空比扫了 60 个
+    百分点。period_cv 只在**周期抖动**方向上敏感，占空比怎么变它都是 0。
+    """
+    n, period = 200 * 1000, 200
+    rc, obj, err = run_tmc(square_codes(n, period, duty_ramp(n, period, 20, 80)))
+    smp = obj["sample_domain"]
+    assert smp["duty_irregular"] is True, f"没标出占空比在变：{smp}"
+    assert 55.0 < smp["duty_spread_pct"] < 65.0, f"极差={smp['duty_spread_pct']}"
+    assert 18.0 < smp["duty_min_pct"] < 22.0, f"min={smp['duty_min_pct']}"
+    assert 78.0 < smp["duty_max_pct"] < 81.0, f"max={smp['duty_max_pct']}"
+    assert rc == 2, f"不可信的数据要 rc=2，实际 {rc}"
+    assert any("占空比在文件内变化" in w for w in obj["warnings"]), obj["warnings"]
+
+
+@case
+def t22_stable_duty_is_not_flagged():
+    """N10 反面：占空比恒定的方波一条警告都不该有（别把正常信号吓成异常）。"""
+    rc, obj, err = run_tmc(square_codes(200 * 1000, 200, 50.0))
+    smp = obj["sample_domain"]
+    assert smp["duty_irregular"] is False, f"稳定方波被误报：{smp}"
+    assert smp["duty_spread_pct"] == 0.0, f"极差={smp['duty_spread_pct']}"
+    assert obj["warnings"] == [], f"稳定方波不该有警告：{obj['warnings']}"
+    assert rc == 0, f"rc={rc}"
+
+
+@case
+def t23_duty_catches_what_cv_misses():
+    """N10 的判据必须用**极差**：少数周期异常会被 CV 稀释掉。
+
+    1000 个周期里丢 1 个脉冲：period_cv 只有 0.0316、duty_cv 只有 0.0158，
+    都远低于 IRREGULAR_CV=0.15，光看变异系数会判成"正常"。极差则掉到 25
+    个百分点。这条用例把"为什么不用 CV"钉住，以后有人想换回 CV 会红。
+    """
+    n, period = 200 * 1000, 200
+    codes = bytearray(square_codes(n, period, 50.0))
+    codes[500 * period:501 * period] = bytes([135] * period)   # 丢掉第 500 个脉冲
+    rc, obj, err = run_tmc(bytes(codes))
+    smp = obj["sample_domain"]
+    assert smp["duty_cv"] < scope.IRREGULAR_CV, \
+        f"用例前提不成立：duty_cv={smp['duty_cv']} 已超阈值，测不到 CV 的盲区"
+    assert smp["duty_irregular"] is True, f"极差没抓到单次丢脉冲：{smp}"
+    assert smp["duty_min_pct"] == 25.0, f"min={smp['duty_min_pct']}"
+    assert rc == 2, f"rc={rc}"
+
+
+@case
+def t24_tmc_flat_warns_and_rc2():
+    """N10 附带：--parse-tmc 以前**没有 warnings、也永远返回 0**。
+
+    它正是无硬件自测用的那条路径，最不该对数据质量沉默。跟 DS100 路径的
+    旧问题同源（t18）。
+    """
+    rc, obj, err = run_tmc(bytes([135] * 500))
+    assert rc == 2, f"平线应 rc=2，实际 {rc}"
+    assert obj["sample_domain"]["flat"] is True, obj
+    assert any("平线" in w for w in obj["warnings"]), obj["warnings"]
+
+
+@case
+def t25_tmc_clean_signal_rc0():
+    """N10 反面：正常的 TMC 文件必须 rc=0 且 warnings 为空（别把成功也标成可疑）。"""
+    rc, obj, err = run_tmc(square_codes(200 * 100, 200, 50.0))
+    smp = obj["sample_domain"]
+    assert smp["flat"] is False and smp["clipped"] is False, smp
+    assert abs(smp["freq_hz"] - 5000.0) < 1.0, f"freq={smp['freq_hz']}"
+    assert rc == 0, f"rc={rc}，warnings={obj['warnings']}"
+    assert obj["warnings"] == [], obj["warnings"]
+
+
+@case
+def t26_tmc_clipped_warns():
+    """N10：码值触到 0/255 轨道要进 warnings 并 rc=2（以前只在人读输出里提一句）。"""
+    n, period = 200 * 100, 200
+    codes = np.frombuffer(square_codes(n, period, 50.0), dtype=np.uint8).copy()
+    codes[::period] = 255          # 每个周期的起点贴到上轨
+    rc, obj, err = run_tmc(codes.tobytes())
+    smp = obj["sample_domain"]
+    assert smp["clipped"] is True, smp
+    assert any("削顶" in w for w in obj["warnings"]), obj["warnings"]
+    assert rc == 2, f"rc={rc}"
+
+
+# ---------------------------------------------------------------------------
+# N11 —— common 的 --json 机制（scope / logic_analyzer 共用）
+# ---------------------------------------------------------------------------
+
+
+@case
+def t27_diagnostics_redirection_keeps_json_pure():
+    """N11：diagnostics_to_stderr 只改道诊断，emit_json 仍落在真 stdout。
+
+    这是 scope.py 和 logic_analyzer.py 共用的机制，所以直接测 common 本人。
+    子进程里进程 stdout 就是 subprocess 抓的那个流，与 _REAL_STDOUT 是同一个，
+    这样"JSON 绕开了改道"才验得准。
+    """
+    import subprocess
+    scripts = str(SCOPE_PY.parent)
+    probe = (
+        "import sys\n"
+        f"sys.path.insert(0, {scripts!r})\n"
+        "from common import diagnostics_to_stderr, emit_json\n"
+        "with diagnostics_to_stderr(True):\n"
+        "    print('DIAG-LINE')\n"
+        "    emit_json({'ok': 1})\n"
+    )
+    r = subprocess.run([sys.executable, "-u", "-c", probe],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    assert r.returncode == 0, r.stderr
+    obj = json.loads(r.stdout)          # 诊断行混进来这里就抛
+    assert obj == {"ok": 1}, obj
+    assert "DIAG-LINE" in r.stderr, f"诊断行没去 stderr：{r.stderr!r}"
+    assert "DIAG-LINE" not in r.stdout, f"诊断行还在 stdout：{r.stdout!r}"
+
+
+@case
+def t28_diagnostics_redirection_disabled_is_noop():
+    """N11 反面：enabled=False 时原样放行，诊断行必须还在 stdout。
+
+    调用处写的是 `with diagnostics_to_stderr(args.json):`，非 --json 那一支
+    走的正是这条路——它要是也改道，正常输出就会被塞进 stderr。
+    """
+    import subprocess
+    scripts = str(SCOPE_PY.parent)
+    probe = (
+        "import sys\n"
+        f"sys.path.insert(0, {scripts!r})\n"
+        "from common import diagnostics_to_stderr, emit_json\n"
+        "with diagnostics_to_stderr(False):\n"
+        "    print('DIAG-LINE')\n"
+        "    emit_json({'ok': 1})\n"
+    )
+    r = subprocess.run([sys.executable, "-u", "-c", probe],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    assert r.returncode == 0, r.stderr
+    assert "DIAG-LINE" in r.stdout, f"关掉改道后诊断行反而没了：{r.stdout!r}"
+    assert r.stderr.strip() == "", f"没改道却写了 stderr：{r.stderr!r}"
 
 
 # ---------------------------------------------------------------------------

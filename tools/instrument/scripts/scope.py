@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import re
 import sys
 import time
@@ -41,24 +40,11 @@ import numpy as np
 
 from common import (
     add_common_args,
+    diagnostics_to_stderr,
+    emit_json,
     ensure_matplotlib_agg,
     require_module,
 )
-
-# --json 唯一出口要用的"真 stdout"。main() 在 --json 模式下把 sys.stdout 改道
-# 到 stderr，人类可读输出就不会混进 JSON 里；那个真流必须在任何改道**之前**
-# 取到，所以放在模块导入期。
-_REAL_STDOUT = sys.stdout
-
-
-def emit_json(obj: dict) -> None:
-    """--json 模式：只把那一份 JSON 写到**真 stdout**。
-
-    覆盖 common.emit_json（那个版本写的是当前 sys.stdout，在 --json 模式下已被
-    改道到 stderr，会把 JSON 一起冲进 stderr）。这里显式给 file= 就是为了绕开
-    那道改道。
-    """
-    print(json.dumps(obj, ensure_ascii=False, indent=2), file=_REAL_STDOUT)
 
 # 测量项名映射（展示名 → SCPI 短助记符；两族机型同一套助记符名）
 MEASURE_ITEMS = {
@@ -509,6 +495,15 @@ FLAT_CODE_SPAN = 8
 # 周期只有 34.7 个采样点，量化占比最大），有 5 倍余量不会误报；
 # 而合成波形里跨相位切换是 0.82、2 采样点窄毛刺是 0.18，都被挡住。
 IRREGULAR_CV = 0.15
+# 逐周期占空比的**极差**（max-min，百分点）超过此值即认为占空比在窗口内变化。
+# 用极差不用 CV：CV 会被"少数周期异常"稀释（1000 个周期丢 1 个脉冲，CV 只有
+# 0.016，和 period_cv 一样淹没在平均里），极差则直接掉到 25%，抓得住。
+# 阈值取 2.0 是给采样网格量化留余量：每周期 P 个点时占空比分辨率是 100/P 个
+# 百分点（P=200 时 0.5%），叠加边沿定位 ±1 点抖动，稳定信号的散布在 1 个
+# 百分点以内——2.0 留了一倍余量。而真正"在变"的占空比（PWM 调光 / 软启动 /
+# 闭环调节）极差是几十个百分点，不会漏。合成波形实测：20%→80% 线性扫 60.0、
+# 丢 1 个脉冲 25.0、稳定 50% 方波 0.0、稳定 49.5% 方波 0.0。
+DUTY_SPREAD_PCT = 2.0
 
 
 def analyze_samples(payload: bytes, volts: np.ndarray, xinc: float,
@@ -525,6 +520,8 @@ def analyze_samples(payload: bytes, volts: np.ndarray, xinc: float,
                  "duty_method": None, "clipped": False, "clip_low": False,
                  "clip_high": False, "flat": False, "noisy": False,
                  "irregular": False, "period_cv": None,
+                 "duty_cv": None, "duty_min_pct": None, "duty_max_pct": None,
+                 "duty_spread_pct": None, "duty_irregular": False,
                  "code_span": None, "periods": 0}
     codes = np.frombuffer(payload, dtype=np.uint8)
     if len(codes):
@@ -588,6 +585,28 @@ def analyze_samples(payload: bytes, volts: np.ndarray, xinc: float,
             if d.mean() > 0:
                 res["period_cv"] = round(float(d.std() / d.mean()), 4)
                 res["irregular"] = bool(res["period_cv"] > IRREGULAR_CV)
+            # 逐周期占空比分布。duty_pct 是个**点估计**，它把窗口内所有周期压成
+            # 一个数：PWM 从 20% 扫到 80% 的窗口，它给出的 49.75% 配上
+            # period_cv=0.0（周期确实恒定）读起来就是"一路稳定的 50% 方波"——
+            # 实测踩过。period_cv 只在**周期抖动**方向上敏感，占空比怎么变它都
+            # 是 0，所以必须单独看分布。
+            #
+            # 用极差（max-min）而不是 CV 当判据：1000 个周期里丢 1 个脉冲，
+            # CV 只有 0.016（和 period_cv 一样淹没在平均值里），但 min 会掉到
+            # 25%——极差把"少数周期异常"和"整体在漂"一起抓出来，两种都是要看
+            # 的。CV 仍一并给出，描述的是漂移的总体离散度。
+            seg = above[rise[0]:rise[-1]].astype(np.int64)
+            hi = np.add.reduceat(seg, (rise - rise[0])[:-1])
+            lens = d                      # 每个完整周期的采样点数
+            duties = hi / lens * 100.0
+            res["duty_min_pct"] = round(float(duties.min()), 2)
+            res["duty_max_pct"] = round(float(duties.max()), 2)
+            res["duty_spread_pct"] = round(
+                float(duties.max() - duties.min()), 2)
+            if duties.mean() > 0:
+                res["duty_cv"] = round(float(duties.std() / duties.mean()), 4)
+            res["duty_irregular"] = bool(
+                res["duty_spread_pct"] > DUTY_SPREAD_PCT)
     elif len(above):
         # 一个上升沿都没有：只能退回窗口均值，并说明它相位有偏。
         res["duty_pct"] = round(float(np.mean(above)) * 100.0, 2)
@@ -835,6 +854,14 @@ def _waveform_warnings(pre: dict, smp: dict, applied: dict, args,
     duty = smp.get("duty_method") or ""
     if duty.startswith("window-mean"):
         warn.append("窗口内边沿不足，占空比按窗口均值估算，受窗口起点相位影响")
+    if smp.get("duty_irregular"):
+        warn.append(
+            f"占空比在窗口内变化：逐周期从 {smp['duty_min_pct']}% 到 "
+            f"{smp['duty_max_pct']}%（极差 {smp['duty_spread_pct']} 个百分点，"
+            f"变异系数 {smp.get('duty_cv')}）。上面报的 duty_pct="
+            f"{smp.get('duty_pct')}% 只是**整段窗口的均值**，不是信号当前的占空比"
+            f"——PWM 调光/软启动/闭环调节都会这样。要看某一点的占空比请缩窄窗口"
+            f"（减小 --points 或调小时基），或改用 --measure 读仪器单周期结果")
     # 时间轴自洽检查。两种模式的判据**不一样**，不能用同一条：
     #   NORM：xinc×点数 就是整屏窗口，必须**等于** 时基×横向格数；
     #   RAW ：xinc 变成深内存的采样间隔（DS2302A 上 5e-10 vs 屏幕 1e-6），
@@ -1104,7 +1131,8 @@ def do_parse_tmc(args) -> int:
         print(f"  读 {args.parse_tmc} → parse_tmc_block（校验 #N 头与长度）")
         print(f"  decode_to_volts: V=(code-{pre['yref']:g}-{pre['yor']:g})"
               f"×{pre['yinc']:g}  → 时间轴 xinc={args.xinc or 1e-6}")
-        print("  analyze_samples：频率/占空比 + 削顶/平线判定")
+        print("  analyze_samples：频率/占空比 + 逐周期占空比分布 + 削顶/平线判定")
+        print("  _tmc_warnings：平线/削顶/不等周期/占空比在变 → warnings + rc=2")
         if args.save:
             print(f"  save_csv → {args.save}")
         if args.plot:
@@ -1132,6 +1160,9 @@ def do_parse_tmc(args) -> int:
     xinc = args.xinc or 1e-6
     times = np.arange(len(volts)) * xinc
     smp = analyze_samples(payload, volts, xinc, pre["yinc"])
+    # 与另外两条路径同一个退出码契约：0=正常 / 2=取到数据但不可信。
+    # 老版本这条路径永远返回 0，削顶/平线/噪声边沿全算"成功"。
+    warnings = _tmc_warnings(smp)
 
     print(f"  ✅ TMC 解析成功: 头 {len(raw)}B → 数据 {len(payload)} 点")
     print(f"     电压  Vmin={volts.min():.3f} V  Vmax={volts.max():.3f} V  "
@@ -1139,8 +1170,11 @@ def do_parse_tmc(args) -> int:
     if not smp["flat"]:
         print(f"     时序  频率 {_fmt(smp['freq_hz'], ' Hz')}  "
               f"占空比 {_fmt(smp['duty_pct'], '%', 2)}  边沿 {smp['edges']}")
-    if smp["clipped"]:
-        print(f"     ⚠️  点位触到 0/255 轨道，Y 方向可能削顶")
+        if smp.get("duty_spread_pct"):
+            print(f"     占空比逐周期范围 {smp['duty_min_pct']}% ~ "
+                  f"{smp['duty_max_pct']}%（极差 {smp['duty_spread_pct']} 个百分点）")
+    for w in warnings:
+        print(f"     ⚠️  {w}")
     if args.save:
         save_csv(times, volts, args.save)
     if args.plot:
@@ -1149,8 +1183,9 @@ def do_parse_tmc(args) -> int:
         emit_json({"file": str(path), "bytes": len(raw), "points": len(payload),
                    "vdiv": vdiv, "voffs": voffs, "xinc": xinc,
                    "vpp_est": round(float(volts.max() - volts.min()), 6),
-                   "sample_domain": smp})
-    return 0
+                   "sample_domain": smp, "warnings": warnings})
+        return 2 if warnings else 0
+    return 2 if warnings else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1288,23 +1323,65 @@ def analyze_volts(times: np.ndarray, volts: np.ndarray) -> dict:
         res["duty_pct"] = smp["duty_pct"]
         res["duty_method"] = smp["duty_method"]
         res["edges"] = smp["edges"]
+        # 占空比分布跟实时路径对齐：duty_pct 同样只是个点估计，逐周期极差
+        # 才是"它到底稳不稳"的答案（见 analyze_samples 里的说明）
+        res["duty_min_pct"] = smp["duty_min_pct"]
+        res["duty_max_pct"] = smp["duty_max_pct"]
+        res["duty_spread_pct"] = smp["duty_spread_pct"]
     return res
+
+
+def _offline_warnings(smp: dict) -> list[str]:
+    """文件类路径（--parse-tmc / --parse-ds100）共享的"数据不可信"判据。
+
+    语义与实时路径 _waveform_warnings 一致（边沿整齐度 / 占空比分布 / 周期数），
+    只是没有仪器可问，判据全部落在数据本身。平线和削顶**不在这里**：它俩的判法
+    两条路径不同（TMC 有码值域，DS100 只有伏特域），文案由调用方自己出。
+    """
+    warn: list[str] = []
+    if smp.get("noisy"):
+        warn.append(f"测出的周期不足采样间隔的 10 倍，这些'边沿'多半是数字化噪声"
+                    f"而不是真信号")
+    if smp.get("irregular"):
+        warn.append(f"上升沿间隔不均匀（变异系数 {smp.get('period_cv')}）：信号不等周期，"
+                    f"freq_hz/duty_pct 只是整段窗口的平均值")
+    if smp.get("duty_irregular"):
+        warn.append(f"占空比在文件内变化：逐周期从 {smp.get('duty_min_pct')}% 到 "
+                    f"{smp.get('duty_max_pct')}%（极差 {smp.get('duty_spread_pct')} "
+                    f"个百分点）：duty_pct={smp.get('duty_pct')}% 只是整段均值，"
+                    f"不是信号当前的占空比")
+    if smp.get("freq_hz") is not None and smp.get("periods", 0) < 2:
+        warn.append(f"窗口内只有 {smp.get('periods')} 个完整周期，占空比不可信"
+                    f"——多导一段数据，或加大采样时长")
+    return warn
 
 
 def _ds100_warnings(res: dict) -> list[str]:
     """DS100 路径的"数据不可信"判据（语义与实时路径一致，见 analyze_volts）。"""
     warn: list[str] = []
-    smp = res.get("sample_domain") or {}
     if res.get("flat"):
         warn.append(f"波形是平线（Vpp={res.get('vpp')}V）：文件里没有信号，"
                     f"不要当成'测到了 0V'")
-    if smp.get("irregular"):
-        warn.append(f"上升沿间隔不均匀（变异系数 {smp.get('period_cv')}）：信号不等周期，"
-                    f"freq_hz/duty_pct 只是整段窗口的平均值")
-    if (res.get("freq_hz") is not None and smp.get("periods", 0) < 2):
-        warn.append(f"窗口内只有 {smp.get('periods')} 个完整周期，占空比不可信"
-                    f"——让示波器多导一段，或加大采样时长")
-    return warn
+    return warn + _offline_warnings(res.get("sample_domain") or {})
+
+
+def _tmc_warnings(smp: dict) -> list[str]:
+    """--parse-tmc 路径的"数据不可信"判据（与 DS100 / 实时路径同一套语义）。
+
+    这条路径以前**一条警告都没有、也永远返回 0**：削顶只在人类可读输出里
+    顺带提一句，平线 / 不等周期 / 噪声边沿全部当成正常结果返回——而它正是
+    无硬件自测用的那条路径，最不该对数据质量沉默。（与 DS100 路径的旧问题
+    同源，见 analyze_volts 的 docstring。）
+    """
+    warn: list[str] = []
+    if smp.get("flat"):
+        warn.append(f"波形是平线（码值跨度仅 {smp.get('code_span')}）：文件里没有信号，"
+                    f"不要当成'测到了 0V'")
+    if smp.get("clipped"):
+        rail = "上" if smp.get("clip_high") else "下"
+        warn.append(f"点位触到{rail}轨（码值触到 0/255），Y 方向已削顶，"
+                    f"Vpp/Vmin/Vmax 全部偏小")
+    return warn + _offline_warnings(smp)
 
 
 def do_parse_ds100(args) -> int:
@@ -1553,17 +1630,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.json:
-        # --json 的契约是"stdout 里只有那一份 JSON"。▶ 型号、⚠️ 警告、✅ 产物、
-        # ⏱️ 深内存调优这些人类可读行以前和 JSON 混在同一个流里，调用方一旦
-        # json.loads(stdout) 就直接抛 JSONDecodeError——而文档承诺的正是
-        # "供 AI 解析"。改道 stderr 后两者都完整：人还是全看得到，机器只拿 JSON。
-        saved, sys.stdout = sys.stdout, sys.stderr
-        try:
-            return _run(args)
-        finally:
-            sys.stdout = saved
-    return _run(args)
+    # --json 的契约是"stdout 里只有那一份 JSON"。▶ 型号、⚠️ 警告、✅ 产物、⏱️ 深内存
+    # 调优这些人类可读行以前和 JSON 混在同一个流里，调用方一旦 json.loads(stdout)
+    # 就直接抛 JSONDecodeError——而文档承诺的正是"供 AI 解析"。改道 stderr 后两者
+    # 都完整：人还是全看得到，机器只拿 JSON。（改道在 _run 之前，见 common 里
+    # diagnostics_to_stderr 的说明。）
+    with diagnostics_to_stderr(args.json):
+        return _run(args)
 
 
 def _run(args) -> int:

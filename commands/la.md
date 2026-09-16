@@ -152,6 +152,7 @@ py .../logic_analyzer.py --dry-run --capture --decoder "spi:CLK=0,MOSI=1,MISO=2,
 12. **长录制提醒**：无触发模式下 `--duration ≥ 30s` 会提前打印采样量与"改用触发"的建议——偶发事件硬录很容易白录（录满全程、事件一次没来）。
 13. **`--export-raw` 后自动打印通道素描**（跳变数 / 按时长加权的高位占比 / 最短脉宽 / 波特率粗估）。判断"ch7 是 MCU TX 还是 RX"先看这个，比人工数跳变可靠；`--decode-uart` 给出 TX/RX 对时，若被标成 RX 的通道**先开口**会提示疑似标反（协议里主动方先发）。
 14. **导出后打印产物行数与体积**，抓完立刻知道这次录了多少。
+15. **`--json` 的 stdout 里只有那一份 JSON**：设备信息（`▶`）、进度（`⏳`）、产物清单（`✅`）全部改道 **stderr**，`json.loads(stdout)` 直接可用。老实现把两者都写进 stdout——`do_capture`/`do_load` 在 `emit_json` **之前**就已经 print 了设备与产物信息，调用方拿到的是"一堆中文 + 末尾一段 JSON"，解析必然失败。机制在 `common.py` 的 `diagnostics_to_stderr`，与 `scope.py` 共用；`--dry-run` 不参与改道（那条路径本来就不发 JSON）。
 
 ## 常见错误
 
