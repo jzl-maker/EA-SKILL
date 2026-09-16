@@ -16,6 +16,14 @@ B. 正点原子 DS100 手持示波器（无 SCPI / 无 PC 软件，USB 仅 U 盘
      频率/幅值/周期/占空比，可 --plot 出图、--save 规范化。
 
 --dry-run        只打印将执行的调用序列，不真正解析
+--json           结构化输出。**stdout 里只有那一份 JSON**：人类可读行（▶ 型号、
+                 ⚠️ 警告、✅ 产物）一律改道 stderr，调用方可以直接
+                 json.loads(stdout)。
+--parse-tmc      离线解析没有仪器可问，前导三元组由 --yref/--yinc/--yor 给，
+                 缺省就是两族实测值（127 / vdiv÷25 / 25×--voffs）。
+
+退出码：0=正常 / 1=失败（含用法错误）/ 2=取到数据但不可信（削顶、平线、噪声、
+不等周期、某项测量测不出）。
 依赖：numpy（必须）；matplotlib（--plot 才需要）；pyvisa（仅 Rigol 路径）。
 """
 
@@ -23,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
 import time
@@ -32,10 +41,24 @@ import numpy as np
 
 from common import (
     add_common_args,
-    emit_json,
     ensure_matplotlib_agg,
     require_module,
 )
+
+# --json 唯一出口要用的"真 stdout"。main() 在 --json 模式下把 sys.stdout 改道
+# 到 stderr，人类可读输出就不会混进 JSON 里；那个真流必须在任何改道**之前**
+# 取到，所以放在模块导入期。
+_REAL_STDOUT = sys.stdout
+
+
+def emit_json(obj: dict) -> None:
+    """--json 模式：只把那一份 JSON 写到**真 stdout**。
+
+    覆盖 common.emit_json（那个版本写的是当前 sys.stdout，在 --json 模式下已被
+    改道到 stderr，会把 JSON 一起冲进 stderr）。这里显式给 file= 就是为了绕开
+    那道改道。
+    """
+    print(json.dumps(obj, ensure_ascii=False, indent=2), file=_REAL_STDOUT)
 
 # 测量项名映射（展示名 → SCPI 短助记符；两族机型同一套助记符名）
 MEASURE_ITEMS = {
@@ -122,20 +145,34 @@ def identify(inst) -> str:
     return resp
 
 
-def find_rigol(rm, resource: str | None) -> str:
-    """选 resource：显式指定，或遍历资源挑 *IDN? 含 RIGOL 的。"""
+def find_rigol(rm, resource: str | None, args=None) -> str:
+    """选 resource：显式指定，或遍历资源挑 *IDN? 含 RIGOL 的。
+
+    args 用于让探测走**同一套**传输参数。老实现用的是写死 1500ms/32B 的占位
+    对象，用户为慢链路调大 --timeout 之后探测照样按 1.5s 判死——一台其实能
+    通上话的仪器被跳过，退回"第一个资源"，报出来的是另一个设备的 *IDN? 失败。
+    """
     resources = list_resources(rm)
     if resource:
         return resource
     for res in resources:
+        inst = None
         try:
-            inst = open_instrument(rm, res, args_placeholder())
+            inst = open_instrument(rm, res, args or _default_transport_args())
             idn = identify(inst).upper()
-            inst.close()
             if "RIGOL" in idn:
                 return res
         except Exception:  # noqa: BLE001 - 跳过不可达资源
             continue
+        finally:
+            # **失败路径也必须关会话**：超时/不是仪器时老代码直接 continue，
+            # inst 就这么挂着；后面 open_instrument 再开一个，同一台设备上
+            # 叠两个 VISA 会话（USB-TMC 上表现为偶发 Unexpected MsgID）。
+            if inst is not None:
+                try:
+                    inst.close()
+                except Exception:  # noqa: BLE001
+                    pass
     # 兜底：找不到 RIGOL 就用第一个资源（并打印警告）
     if resources:
         print(f"⚠️  未发现 RIGOL 设备，使用第一个资源 {resources[0]}")
@@ -143,10 +180,10 @@ def find_rigol(rm, resource: str | None) -> str:
     raise RuntimeError("无可用 VISA 资源：示波器未插 / 未装 USB-TMC 驱动 / 后端缺失")
 
 
-def args_placeholder():
-    """open_instrument 的默认 args 值。"""
+def _default_transport_args():
+    """find_rigol 拿不到真实 args 时的兜底传输参数（与命令行默认值对齐）。"""
     class _A:
-        timeout = 1500
+        timeout = 3000
         chunk = 32
     return _A()
 
@@ -260,6 +297,7 @@ def probe_hdiv(inst) -> float | None:
         inst.write(":WAV:MODE NORM")
         npts = float(inst.query(":WAV:POIN?").strip().split(",")[0])
     except Exception:  # noqa: BLE001 - 读不到就不做这项检查，别用假值误报
+        drain(inst)  # 同 _query_short：超时的回复会迟到，别留给下一次读
         return None
     finally:
         try:
@@ -267,6 +305,18 @@ def probe_hdiv(inst) -> float | None:
         except Exception:  # noqa: BLE001
             pass
     return npts / SCREEN_POINTS_PER_DIV if npts > 0 else None
+
+
+def _channel_index(channel: str) -> int | None:
+    """`CHAN1`/`chan1`/`1` → 1；认不出来返回 None。
+
+    老写法是 `int(str(channel).upper().replace("CHAN","") or 0)`：`--channel
+    CHANX` 这类拼错会直接抛 ValueError，被外层 except 兜住后报成
+    "❌ 抓取失败：invalid literal for int() with base 10: 'X'"——用户看不出
+    是自己把通道名写错了。
+    """
+    m = re.fullmatch(r"(?:CHAN)?\s*(\d+)", str(channel).strip().upper())
+    return int(m.group(1)) if m else None
 
 
 def channel_exists(inst, channel: str) -> bool:
@@ -278,7 +328,10 @@ def channel_exists(inst, channel: str) -> bool:
     余往返；CHAN3/4 才探一次——**探完必须 drain**：DS2302A 实测主机侧超时
     后仪器会把 -410,"Query INTERRUPTED" 排进队列，不排空会污染后续读取。
     """
-    n = int(str(channel).upper().replace("CHAN", "") or 0)
+    n = _channel_index(channel)
+    if n is None:
+        print(f"❌ 通道名无法识别：{channel!r}（形如 CHAN1 / CHAN2）")
+        return False
     if n <= 2:
         return True
     if _query_short(inst, f":CHAN{n}:SCAL?") is not None:
@@ -369,6 +422,23 @@ def restore_deep_read(inst, saved: tuple) -> None:
             pass
 
 
+def _offline_preamble(args) -> dict:
+    """离线解析（--parse-tmc）用的前导三元组。
+
+    与在线路径**同一个公式**：实测两族机型都是 YREF=127（不是 128）、
+    YINC=vdiv/25、YOR=25×OFFS（单位是**码值**，不是伏特）。老代码在离线路径
+    走的是 pre=None 的旧公式 `(code-128)/25*vdiv+voffs`，同一份 TMC 块会比
+    真机上低 1 个码值（1 V/div 时 0.04 V），而且离线时没有任何参数能把它掰
+    回来。--voffs 在这里按仪器自己的关系换算成码值，语义与在线路径一致。
+    """
+    vdiv = args.vdiv or 1.0
+    return {
+        "yref": args.yref if args.yref is not None else 127.0,
+        "yinc": args.yinc if args.yinc is not None else vdiv / 25.0,
+        "yor": args.yor if args.yor is not None else 25.0 * (args.voffs or 0.0),
+    }
+
+
 def parse_tmc_block(raw: bytes) -> bytes:
     """解析 TMC 二进制块 #NXXXXXX<data>：N 位 ASCII 长度 + 精确切片。"""
     if not raw or raw[:1] != TMC_HEADER:
@@ -398,6 +468,9 @@ def read_preamble(inst, vdiv: float) -> dict:
         try:
             return float(inst.query(cmd).strip().split(",")[0])
         except Exception:  # noqa: BLE001 - 前导读不到就退回缺省，不打断抓取
+            # 前导查询失败同样会留下迟到回复，而紧跟着的 :WAV:DATA? 是
+            # read_raw——读到污染字节会把 TMC 长度头解错，整块数据报废。
+            drain(inst)
             return default
 
     return {
@@ -566,12 +639,18 @@ _MEAS_STATE: dict = {"form": None, "idn": None}
 
 
 def _query_short(inst, cmd: str) -> str | None:
-    """短超时查询；超时返回 None（探测阶段超时是**预期结果**，不是错误）。"""
+    """短超时查询；超时返回 None（探测阶段超时是**预期结果**，不是错误）。
+
+    失败时必须 drain：本机实测"查询超时"不等于"不会回"，迟到回复会占住
+    读缓冲，让此后**每一次**读取错位一格（D1）。探测阶段超时是家常便饭，
+    正是最容易踩到的地方——老版本只在上层某个调用点补了 drain，其余全漏。
+    """
     old = inst.timeout
     inst.timeout = PROBE_TIMEOUT_MS
     try:
         return inst.query(cmd).strip()
     except Exception:  # noqa: BLE001 - 探测：不回就是"不支持"
+        drain(inst)
         return None
     finally:
         try:
@@ -800,13 +879,17 @@ def _waveform_warnings(pre: dict, smp: dict, applied: dict, args,
     return warn
 
 
-def _measurement_warnings(measured: dict, applied: dict, volts) -> list[str]:
+def _measurement_warnings(measured: dict, applied: dict,
+                          vpp: float | None) -> list[str]:
     """把"内置测量没测出来"做成显式警告，并给出可操作的方向。
 
     实测 DS2302A：0.35Vpp 的信号打在 1V/div 上（纵向仅 0.35 格）时，
     :MEAS:VPP? 正常回数而 FREQ/PDUTy/PWIDth **全部回 9.9E37 哨兵**；
     降到 0.5V/div 就都正常。也就是说时间类测量失败最常见的原因是**幅度
     相对量程太小**，跟"超量程"正好相反——这条不能只靠通用提示。
+
+    vpp 由调用方给（抓取路径用波形算，纯测量路径用仪器回的 vpp），拿不到
+    就传 None——那时只报"没取到值"，不做占比/探头这类需要幅度的推断。
     """
     warn: list[str] = []
     na = [k for k, v in measured.items() if v is None]
@@ -815,7 +898,7 @@ def _measurement_warnings(measured: dict, applied: dict, volts) -> list[str]:
     warn.append(f"内置测量未取到值：{', '.join(na)}"
                 f"（已置 null，不是 0——不要当成测到了零）")
     vdiv = applied.get("vdiv")
-    vpp = float(volts.max() - volts.min())
+    vpp = float(vpp) if vpp else 0.0
     time_items = {"freq", "period", "pwidth", "nwidth", "pduty", "nduty"}
     if vdiv and vpp > 0 and (set(na) & time_items) and measured.get("vpp") is not None:
         div_used = vpp / vdiv
@@ -854,7 +937,7 @@ def do_capture(args) -> int:
         return 1
     rm = ensure_pyvisa(args, ns)
     try:
-        resource = find_rigol(rm, args.resource)
+        resource = find_rigol(rm, args.resource, args)
         inst = open_instrument(rm, resource, args)
         with inst:
             idn = identify(inst)
@@ -899,7 +982,8 @@ def do_capture(args) -> int:
 
             measured = collect_measurements(inst, args, items) if items else None
             if measured:
-                warnings.extend(_measurement_warnings(measured, applied, volts))
+                warnings.extend(_measurement_warnings(
+                    measured, applied, float(volts.max() - volts.min())))
             result = {
                 "idn": idn, "channel": args.channel, "mode": args.mode,
                 "points": len(volts), "vdiv": applied["vdiv"],
@@ -974,21 +1058,38 @@ def do_measure(args) -> int:
         return 1
     rm = ensure_pyvisa(args, ns)
     try:
-        resource = find_rigol(rm, args.resource)
+        resource = find_rigol(rm, args.resource, args)
         inst = open_instrument(rm, resource, args)
         with inst:
             idn = identify(inst)
             _MEAS_STATE["idn"] = idn  # 供测量形式探测用，省一次 *IDN?
+            if not channel_exists(inst, args.channel):
+                return 1
+            # 前端配置在这条路径上以前**完全没有**：--vdiv/--voffs/--coupling/
+            # --timebase/--autoset 全是死参数（--dry-run 的计划里就看得出来），
+            # 而工具自己给的提示还让用户"把 --vdiv 调小再测"——那条建议在
+            # --measure 单独用时根本执行不了。configure_frontend 只在用户**给了**
+            # 对应参数时才写仪器，缺省全是查询，所以无条件调用不会改变仪器状态。
+            vdiv, applied = configure_frontend(inst, args)
             values = collect_measurements(inst, args, items)
-            result = {"idn": idn, "channel": args.channel, "measurements": values}
+            warnings = _measurement_warnings(values, applied, values.get("vpp"))
+            result = {"idn": idn, "channel": args.channel,
+                      "vdiv": applied["vdiv"], "voffs": applied["voffs"],
+                      "coupling": applied.get("coupling"),
+                      "probe": applied.get("probe"),
+                      "timebase_s": applied.get("timebase_s"),
+                      "measurements": values, "warnings": warnings}
             if args.json:
                 emit_json(result)
             else:
                 print(f"  ▶ {idn} | {args.channel}")
                 for k, v in values.items():
                     print(f"  {k:8s} = {'N/A（无有效测量）' if v is None else v}")
-            # 有项目没测出来 → 非 0，避免 AI 把 N/A 当成正常的 0
-            return 2 if any(v is None for v in values.values()) else 0
+                for w in warnings:
+                    print(f"  ⚠️  {w}")
+            # 有项目没测出来（或有警告）→ 非 0，避免 AI 把 N/A 当成正常的 0
+            return 2 if (warnings
+                         or any(v is None for v in values.values())) else 0
     except Exception as exc:  # noqa: BLE001
         print(f"❌ 测量失败：{exc}")
         return 1
@@ -998,10 +1099,11 @@ def do_measure(args) -> int:
 def do_parse_tmc(args) -> int:
     """无硬件自测：解析合成/保存的原始 TMC 块文件。"""
     if args.dry_run:
+        pre = _offline_preamble(args)
         print("🔍 dry-run：TMC 块解析流程（不读文件）\n")
         print(f"  读 {args.parse_tmc} → parse_tmc_block（校验 #N 头与长度）")
-        print(f"  decode_to_volts（vdiv={args.vdiv or 1.0} voffs={args.voffs or 0.0}）"
-              f" → 时间轴 xinc={args.xinc or 1e-6}")
+        print(f"  decode_to_volts: V=(code-{pre['yref']:g}-{pre['yor']:g})"
+              f"×{pre['yinc']:g}  → 时间轴 xinc={args.xinc or 1e-6}")
         print("  analyze_samples：频率/占空比 + 削顶/平线判定")
         if args.save:
             print(f"  save_csv → {args.save}")
@@ -1025,10 +1127,11 @@ def do_parse_tmc(args) -> int:
         return 1
     vdiv = args.vdiv or 1.0
     voffs = args.voffs or 0.0
-    volts = decode_to_volts(payload, vdiv, voffs)
+    pre = _offline_preamble(args)
+    volts = decode_to_volts(payload, vdiv, voffs, pre)
     xinc = args.xinc or 1e-6
     times = np.arange(len(volts)) * xinc
-    smp = analyze_samples(payload, volts, xinc, vdiv / 25.0)
+    smp = analyze_samples(payload, volts, xinc, pre["yinc"])
 
     print(f"  ✅ TMC 解析成功: 头 {len(raw)}B → 数据 {len(payload)} 点")
     print(f"     电压  Vmin={volts.min():.3f} V  Vmax={volts.max():.3f} V  "
@@ -1143,9 +1246,21 @@ def load_ds100_csv(path: str, time_col: int | None = None,
     return np.arange(len(volts)) * step, volts, "explicit" if explicit else "1col", meta
 
 
-def analyze_volts(times: np.ndarray, volts: np.ndarray) -> dict[str, float | int | None]:
-    """纯 numpy 波形测量：幅值 / 直流 / 有效值 / 频率 / 周期 / 占空比。"""
-    res: dict[str, float | int | None] = {
+# DS100 的 CSV 是伏特不是码值，没有 FLAT_CODE_SPAN 可用：1 µV 以下的 Vpp 只能
+# 是直流或空文件，按"无信号"处理（与实时路径的平线判据同一个语义）。
+DS100_FLAT_VPP = 1e-6
+
+
+def analyze_volts(times: np.ndarray, volts: np.ndarray) -> dict:
+    """纯 numpy 波形测量：幅值 / 直流 / 有效值 / 频率 / 周期 / 占空比。
+
+    **把 analyze_samples 的判据整块带出来**（sample_domain: flat / irregular /
+    period_cv / periods）。老版本只取走 freq/duty 那几个数，后果有两个：
+    ① DS100 路径永远返回 0，波形是平线也算"成功"；② commands/scope.md 的
+    DS100 章节让用户看 `sample_domain.periods` 判断占空比可不可信，而那个字段
+    在 DS100 的输出里压根不存在（那段话是从实时路径抄过来的）。
+    """
+    res: dict = {
         "points": int(len(volts)),
         "duration_s": round(float(times[-1] - times[0]), 9),
         "vmin": round(float(volts.min()), 6),
@@ -1158,11 +1273,16 @@ def analyze_volts(times: np.ndarray, volts: np.ndarray) -> dict[str, float | int
         "duty_pct": None,
     }
     vpp = res["vpp"]
-    if vpp > 1e-9 and len(volts) > 4:
+    res["flat"] = bool(vpp <= DS100_FLAT_VPP)
+    if not res["flat"] and len(volts) > 4:
         # 与实时路径共用同一套算法：整数周期内的频率 + 占空比。
         # 逐周期取中位数会被采样网格量化（实测 2us/点时误差 -3.55%，跨度法 -0.12%）。
         step = float(times[1] - times[0]) if len(times) > 1 else 0.0
         smp = analyze_samples(np.zeros(0, dtype=np.uint8), volts, step, vpp / 250.0)
+        # 实时路径的 flat 是按**码值跨度**判的，DS100 没有码值这一层，用上面
+        # 按 vpp 得出的结论覆盖掉，免得 sample_domain.flat 与顶层 flat 打架
+        smp["flat"] = False
+        res["sample_domain"] = smp
         res["period_s"] = smp["period_s"]
         res["freq_hz"] = smp["freq_hz"]
         res["duty_pct"] = smp["duty_pct"]
@@ -1171,11 +1291,28 @@ def analyze_volts(times: np.ndarray, volts: np.ndarray) -> dict[str, float | int
     return res
 
 
+def _ds100_warnings(res: dict) -> list[str]:
+    """DS100 路径的"数据不可信"判据（语义与实时路径一致，见 analyze_volts）。"""
+    warn: list[str] = []
+    smp = res.get("sample_domain") or {}
+    if res.get("flat"):
+        warn.append(f"波形是平线（Vpp={res.get('vpp')}V）：文件里没有信号，"
+                    f"不要当成'测到了 0V'")
+    if smp.get("irregular"):
+        warn.append(f"上升沿间隔不均匀（变异系数 {smp.get('period_cv')}）：信号不等周期，"
+                    f"freq_hz/duty_pct 只是整段窗口的平均值")
+    if (res.get("freq_hz") is not None and smp.get("periods", 0) < 2):
+        warn.append(f"窗口内只有 {smp.get('periods')} 个完整周期，占空比不可信"
+                    f"——让示波器多导一段，或加大采样时长")
+    return warn
+
+
 def do_parse_ds100(args) -> int:
     """DS100 CSV 解析：弹性读列 → 测量 → 可选出图/存规范化 CSV/JSON。"""
     if args.dry_run:
         _print_ds100_plan(args)
         return 0
+    warnings: list[str] = []
     try:
         times, volts, mode, meta = load_ds100_csv(
             args.parse_ds100, args.time_col, args.volt_col, args.xinc)
@@ -1188,6 +1325,10 @@ def do_parse_ds100(args) -> int:
         res["header_sampling_rate_hz"] = meta["sampling_rate_hz"]
         res["probe"] = meta["probe"]
         res["file"] = args.parse_ds100
+        # 与实时路径同一个退出码契约：0=正常 / 2=取到数据但不可信。老版本这条
+        # 路径永远返回 0——平线、窗口不足 2 个周期、不等周期信号全都算"成功"。
+        warnings = _ds100_warnings(res)
+        res["warnings"] = warnings
 
         if args.save:
             save_csv(times, volts, args.save)
@@ -1196,7 +1337,7 @@ def do_parse_ds100(args) -> int:
 
         if args.json:
             emit_json(res)
-            return 0
+            return 2 if warnings else 0
 
         print(f"  📄 {args.parse_ds100}  →  {res['points']} 点，{res['columns']}")
         if res["header_sampling_rate_hz"]:
@@ -1207,11 +1348,13 @@ def do_parse_ds100(args) -> int:
         if res["freq_hz"] is not None:
             print(f"     频率  {res['freq_hz']}Hz  (T={res['period_s']}s)  占空比 {res['duty_pct']}%")
         else:
-            print("     频率  N/A（非周期性信号或点数不足）")
+            print("     频率  N/A（平线 / 非周期性信号 / 点数不足）")
+        for w in warnings:
+            print(f"  ⚠️  {w}")
     except Exception as exc:  # noqa: BLE001
         print(f"❌ DS100 CSV 解析失败：{exc}")
         return 1
-    return 0
+    return 2 if warnings else 0
 
 
 def _print_ds100_plan(args) -> None:
@@ -1226,38 +1369,66 @@ def _print_ds100_plan(args) -> None:
         print(f"  plot_waveform → {args.plot}")
 
 
-def _print_scpi_plan(args) -> None:
-    """dry-run 必须打印**真实**会执行的序列。
+def _print_frontend_plan(args) -> None:
+    """打印 configure_frontend 会发的命令。
 
-    老版本这里打的是 :TRIG:MOD SING / :SINGle / *OPC?，而 do_capture 实际
-    走的是 :RUN + 等待——dry-run 和真跑不一致，等于骗人。
+    抓取路径与纯测量路径共用这一份：各抄一份的话，改实现时很容易只改一处，
+    "dry-run 与真跑不一致"就是这么来的（见 _print_scpi_plan 的注释）。
     """
-    print("🔍 dry-run：将执行以下 SCPI 命令序列（未连接设备）\n")
-    print(f"  rm.list_resources() → 挑 RIGOL（--resource {args.resource or 'auto'}）")
-    print("  *IDN?   → 识别型号")
     if args.autoset:
-        print("  :AUT    → 自动选档 + *OPC? 等待完成（本机实测 6.9s）")
+        print("  :AUT    → 自动选档 + *OPC? 等待完成（DS1074Z 实测 6.9s / DS2302A 1.6s）")
     if args.timebase is not None:
         print(f"  :TIM:SCAL {args.timebase:g}  →  :TIM:SCAL?")
+    print("  :TIM:SCAL?  →  时基实际值（时间轴自洽检查要拿它对账）")
     if args.coupling:
         print(f"  :{args.channel}:COUP {args.coupling}  →  :{args.channel}:COUP?")
     if args.vdiv is None:
         print(f"  :{args.channel}:SCAL?  → 读当前灵敏度（未指定 --vdiv）")
     else:
-        print(f"  :{args.channel}:SCAL {args.vdiv:g}")
+        print(f"  :{args.channel}:SCAL {args.vdiv:g}  →  :{args.channel}:SCAL?"
+              f"（仪器按档位取整，回读才是真值）")
     if args.voffs is not None:
         print(f"  :{args.channel}:OFFS {args.voffs:g}")
+    elif args.vdiv is not None:
+        print(f"  :{args.channel}:OFFS 0  →  给了 --vdiv 就把残留偏置归零")
     print(f"  :{args.channel}:OFFS?  →  回读实际生效的偏置")
+    print(f"  :{args.channel}:PROB?  →  探头倍率（读数小 10 倍时靠它看出来）")
+
+
+def _print_scpi_plan(args) -> None:
+    """dry-run 必须打印**真实**会执行的序列。
+
+    老版本这里打的是 :TRIG:MOD SING / :SINGle / *OPC?，而 do_capture 实际
+    走的是 :RUN + 等待——dry-run 和真跑不一致，等于骗人。RAW 分支还漏了
+    :STOP、并把 :WAV:MODE RAW 打在了 :RUN 之前，而真实顺序是「先 :RUN 等
+    settle，再 :STOP，最后才配深内存」。本函数现在与 do_capture 逐行对齐。
+    """
+    raw_mode = args.mode.upper() == "RAW"
+    depth = args.points or 12000
+    print("🔍 dry-run：将执行以下 SCPI 命令序列（未连接设备）\n")
+    print(f"  rm.list_resources() → 挑 RIGOL（--resource {args.resource or 'auto'}，"
+          f"探测用同一套 --timeout/--chunk）")
+    print("  *IDN?   → 识别型号")
+    print(f"  通道 {args.channel}：CHAN1/2 直接放行，CHAN3/4 用 600ms 短超时探一次")
+    _print_frontend_plan(args)
+    print("  :WAV:POIN?（临时切 NORM 再恢复原模式）→ 横向格数=点数/100"
+          "（DS1074Z 12 格 / DS2302A 14 格）")
+    print(f"  :RUN    → 连续采集（等 --settle {args.settle}s）")
+    if raw_mode:
+        print("  :STOP   → 深内存只能在**停止态**读（RUN 期间只吐屏幕点数）")
     print(f"  :WAV:SOUR {args.channel} / :WAV:FORM BYTE / :WAV:MODE {args.mode}")
-    if args.mode.upper() == "RAW":
-        depth = args.points or 12000
-        print(f"  :ACQ:MDEP {depth} / :WAV:STAR 1 / :WAV:STOP {depth}")
-    print(f"  :RUN    → 连续采集（等 {args.settle}s）")
+    if raw_mode:
+        print(f"  :ACQ:MDEP {depth} →  :ACQ:MDEP? 回读实际深度"
+              f" →  :WAV:STAR 1 / :WAV:STOP min({depth}, 实际)")
     print("  :WAV:YREF? / :WAV:YINC? / :WAV:YOR?  → 前导，用于 V=(code-YREF-YOR)*YINC")
     print("  :WAV:XINC? / :WAV:XOR?  → 时间轴")
-    print("  :WAV:POIN?（NORM 下）→ 横向格数=点数/100（DS1074Z 12 格 / DS2302A 14 格）")
+    if raw_mode:
+        print(f"  chunk 临时提到 65536、超时提到 "
+              f"{(2000 + depth * 0.009) / 1000:.1f}s → 读完还原")
     print("  :WAV:DATA?  → read_raw 取 TMC 块 → parse_tmc_block → 还原电压")
-    print("  analyze_samples → 整数周期频率/占空比 + 削顶/平线/噪声判定")
+    if raw_mode:
+        print("  :RUN    → 恢复屏幕刷新")
+    print("  analyze_samples → 整数周期频率/占空比 + 削顶/平线/噪声/不等周期判定")
     if args.measure:
         for item in [i.strip().lower() for i in args.measure.split(",") if i.strip()]:
             scpi = MEASURE_ITEMS.get(item, item.upper())
@@ -1273,7 +1444,11 @@ def _print_scpi_plan(args) -> None:
 
 def _print_measure_plan(args) -> None:
     print("🔍 dry-run：将执行以下 SCPI 命令序列（未连接设备）\n")
+    print(f"  rm.list_resources() → 挑 RIGOL（--resource {args.resource or 'auto'}，"
+          f"探测用同一套 --timeout/--chunk）")
     print("  *IDN?  → 识别型号")
+    print(f"  通道 {args.channel}：CHAN1/2 直接放行，CHAN3/4 用 600ms 短超时探一次")
+    _print_frontend_plan(args)
     print("  :RUN   → 让测量引擎有实时数据（:STOP 状态下部分项只回 9.9E37 哨兵）")
     print("  形式探测：按 *IDN? 猜一种，再用 600ms 短超时发一次 :MEAS:VPP? 确认，"
           "不对就换另一种")
@@ -1357,6 +1532,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help=":WAV:MODE，NORM 屏幕点（默认） / RAW 深内存（需 --points 定区间，"
                              "读取前会自动 :STOP，部分机型 :ACQ:MDEP 不可写）")
     parser.add_argument("--xinc", type=float, help="每采样点时间间隔 s（--parse-tmc / DS100 单列用，默认 1us）")
+    parser.add_argument("--yref", type=float,
+                        help="离线解析的 Y 参考**码值**（--parse-tmc；缺省按两族实测 127）")
+    parser.add_argument("--yinc", type=float,
+                        help="离线解析的每码值电压（--parse-tmc；缺省 vdiv/25）")
+    parser.add_argument("--yor", type=float,
+                        help="离线解析的 Y 偏移**码值**（--parse-tmc；缺省 25×--voffs，"
+                             "与仪器的 YOR=25×OFFS 同一条关系）")
     parser.add_argument("--sample-rate", type=float,
                         help="采样率 Hz（DS100 便捷写法，等价 xinc=1/rate；与 --xinc 冲突）")
     parser.add_argument("--time-col", type=int, help="DS100 CSV 时间列（0 基，默认自动探测）")
@@ -1371,6 +1553,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.json:
+        # --json 的契约是"stdout 里只有那一份 JSON"。▶ 型号、⚠️ 警告、✅ 产物、
+        # ⏱️ 深内存调优这些人类可读行以前和 JSON 混在同一个流里，调用方一旦
+        # json.loads(stdout) 就直接抛 JSONDecodeError——而文档承诺的正是
+        # "供 AI 解析"。改道 stderr 后两者都完整：人还是全看得到，机器只拿 JSON。
+        saved, sys.stdout = sys.stdout, sys.stderr
+        try:
+            return _run(args)
+        finally:
+            sys.stdout = saved
+    return _run(args)
+
+
+def _run(args) -> int:
     # --sample-rate 便捷写法 → xinc（互斥校验）
     if args.sample_rate is not None:
         if args.xinc is not None:

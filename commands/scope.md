@@ -26,9 +26,9 @@
 | 前端配置 | `--coupling/--vdiv/--voffs/--timebase/--autoset` | `:{ch}:COUP/SCAL/OFFS`、`:TIM:SCAL`、`:AUT` | pyvisa |
 | CSV / PNG | `--save` / `--plot` | numpy + matplotlib | + matplotlib |
 | 设备识别 | `--detect` | 列资源 + 逐个 `*IDN?` | pyvisa |
-| 无硬件自测 | `--parse-tmc <file>` | 合成 TMC 块走解析链路 | numpy 即可 |
+| 无硬件自测 | `--parse-tmc <file>` | 合成 TMC 块走解析链路（前导由 `--yref/--yinc/--yor` 给） | numpy 即可 |
 
-**退出码**：`0`=正常 / `1`=失败（含参数错误、文件不存在、连不上）/ `2`=取到数据但不可信（削顶、平线、噪声、某项测不出）。按 rc 分支时不要把 2 当失败丢弃——数据在，只是需要看 `warnings`。
+**退出码**：`0`=正常 / `1`=失败（含参数错误、通道名写错、本机没这个通道、文件不存在、连不上）/ `2`=取到数据但不可信（削顶、平线、噪声、不等周期、窗口内周期数不足、某项测不出）。**Rigol 与 DS100 两条路径同一套语义**——DS100 解析平线 CSV 也回 2。按 rc 分支时不要把 2 当失败丢弃——数据在，只是需要看 `warnings`。
 
 SCPI 基本通用，主流品牌（Siglent/鼎阳/泰克等）命令集大同小异，换设备只需调 `--resource`。
 
@@ -40,6 +40,8 @@ SCPI 基本通用，主流品牌（Siglent/鼎阳/泰克等）命令集大同小
 | 采样率自动提取 | `--parse-ds100` | 正则解析 header `sampling rate : N` | numpy |
 | 频率/周期/占空比 | `--parse-ds100` | 首末上升沿跨度法 + 整数周期占空比（与 Rigol 路径同源） | numpy |
 | 波形出图 | `--plot` | matplotlib | + matplotlib |
+
+DS100 路径的 `sample_domain` 与实时路径是**同一套判据**（`flat`/`irregular`/`period_cv`/`periods`），退出码也同一套：平线 → rc=2，窗口内不足 2 个完整周期 → rc=2 并说明占空比不可信。**不要只看 `freq_hz` 有没有值就下结论**——平线时它同样是 `null`，但"测到 0 V"和"没测到"是两件事。
 
 DS100 限制：**不支持 SCPI、无官方 PC 软件**，USB 仅作 U 盘（卷标 `ATK-DSO`）。只能在示波器上按 **M → Save → CSV** 导出原始采样，再用本命令解析。
 
@@ -62,6 +64,9 @@ py .../scope.py --capture --coupling DC --vdiv 1 --timebase 5e-5 --measure vpp,f
 # 直接测量（不抓波形）：Vpp / 频率 / 周期
 py .../scope.py --measure vpp,freq,period
 
+# 直接测量也可以先配前端（时间类项测不出时最常见的解法就是调小 --vdiv）
+py .../scope.py --measure vpp,freq,pduty --coupling DC --vdiv 0.5 --json
+
 # 让仪器自己选档（发 :AUT，等 ~2s），再抓
 py .../scope.py --capture --autoset --measure vpp,freq --json
 
@@ -77,6 +82,10 @@ py .../scope.py --capture --resource USB0::0x1AB1::0x04B0::DS2D000000::INSTR
 
 # 无硬件自测：解析合成 TMC 块（验证解析/还原/出图全链路）
 py .../scope.py --parse-tmc raw.bin --vdiv 1.0 --xinc 1e-6 --save out.csv --plot out.png
+
+# 前导三元组：离线缺省即真机实测值（127 / vdiv÷25 / 25×voffs），
+# 只有解析别的机型/别人给的块时才需要显式覆盖
+py .../scope.py --parse-tmc raw.bin --vdiv 1.0 --yref 127 --yinc 0.04 --yor 0
 
 # 纯逻辑核对（打印将执行的 SCPI 序列，不连设备）
 py .../scope.py --dry-run --capture
@@ -99,15 +108,16 @@ py .../scope.py --parse-ds100 wave.csv --time-col 0 --volt-col 2 --plot wave.png
 | `--detect` | 是（动作） | 探测 pyvisa / 资源 / 设备，并**逐个资源试 `*IDN?`**（区分"插上了"与"能通上话"） |
 | `--list` | 是（动作） | 列出所有 VISA 资源 |
 | `--capture` | 是（动作，默认） | 抓波形主流程 |
-| `--measure <items>` | 是（动作） | 内置测量，逗号分隔 `vpp,vmax,vmin,vtop,vbase,vamp,vrms,vavg,freq,period,pwidth,nwidth,pduty,nduty`。**单独给=只测量；与 `--capture` 一起给=同一连接内既抓又测** |
-| `--parse-tmc <file>` | 是（动作） | 解析原始 TMC 块文件（自测） |
+| `--measure <items>` | 是（动作） | 内置测量，逗号分隔 `vpp,vmax,vmin,vtop,vbase,vamp,vrms,vavg,freq,period,pwidth,nwidth,pduty,nduty`。**单独给=只测量；与 `--capture` 一起给=同一连接内既抓又测**。单独用时前端参数（`--vdiv/--voffs/--coupling/--timebase/--autoset`）同样生效——工具提示里"把 `--vdiv` 调小再测"这句话是为这条路径写的 |
+| `--parse-tmc <file>` | 是（动作） | 解析原始 TMC 块文件（自测）。前导三元组由 `--yref/--yinc/--yor` 给，缺省 `127 / vdiv÷25 / 25×--voffs`——与在线路径**同一个公式** |
 | `--parse-ds100 <file.csv>` | 是（动作） | 解析 DS100 导出 CSV（跳过 header，自动探测列） |
+| `--yref` / `--yinc` / `--yor` | 否 | 仅 `--parse-tmc`：手写前导值（离线没有仪器可问）。缺省即两族实测值，**只在解析别的机型/别人给的块时才需要覆盖** |
 | `--resource` | 否 | VISA 资源串（缺省自动挑 RIGOL） |
 | `--backend` | 否 | 后端：缺省**系统 VISA 优先**（USB-TMC 需系统后端/NI-VISA），无资源回退 `@py`（网口）；显式传则用指定后端 |
 | `--timeout` | 否 | 查询超时 ms（默认 **3000**；RAW 读取时按 9 µs/点自动放宽）。两族机型对不认识的助记符**既不报错也不回复**，超时太短会把机型差异误报成链路故障 |
 | `--chunk` | 否 | read_raw 分块字节（默认 32，DS1000Z USB 稳定性）。**RAW 读取期间自动提到 65536**——32 字节读 140 KB 要 6.16 s、1.4 MB 直接超时，见注意事项 3 |
 | `--settle` | 否 | `:RUN` 后等波形就绪的秒数（默认 0.8）。改时基/档位后太短会抓到旧帧 |
-| `--channel` | 否 | 通道（默认 CHAN1） |
+| `--channel` | 否 | 通道（默认 CHAN1）。接受 `CHAN1`/`chan1`/`1`；**认不出来或本机没有这个通道都当场报错并 rc=1**，不会拖到后面查询超时才报一句 `VI_ERROR_TMO` |
 | `--vdiv` | 否 | 垂直灵敏度 V/div（默认读 SCPI）。**给了 `--vdiv` 就把 `:OFFS` 归零**——DS1000Z 换档时会按比例缩放残留偏置（实测 0.5→1 V/div 把 −2.41 V 变成 −4.82 V），不归零会让上一次的偏置悄悄改变本次结果 |
 | `--voffs` | 否 | 通道偏置 V，**写进仪器** `:{ch}:OFFS`（不是只在换算公式里加减）。缺省不动仪器当前值 |
 | `--timebase` | 否 | 时基 s/div，写 `:TIM:SCAL` |
@@ -121,16 +131,18 @@ py .../scope.py --parse-ds100 wave.csv --time-col 0 --volt-col 2 --plot wave.png
 | `--volt-col` | 否 | DS100 CSV 电压列（0 基，默认自动探测） |
 | `--save <file.csv>` | 否 | 波形 CSV（time_s,voltage_v 两列） |
 | `--plot <file.png>` | 否 | 波形图 png |
-| `--dry-run` | 否 | 只打印将执行的调用序列，不连接/不解析 |
-| `--json` | 否 | 结构化 JSON 输出（供 AI 解析） |
+| `--dry-run` | 否 | 只打印将执行的调用序列，不连接/不解析。**打印的序列与真实执行的一致**（含 RAW 的 `:STOP` 时机、前端配置、chunk/超时调整），可当契约读 |
+| `--json` | 否 | 结构化 JSON 输出（供 AI 解析）。**stdout 里只有那一份 JSON**——型号行/警告/产物路径一律走 stderr，`json.loads(stdout)` 直接可用 |
 
 ## 工作流程（AI 执行闭环）
 
 ```
 1. --detect          pyvisa 栈 + VISA 资源 + 逐个 *IDN? 识别型号
-2. 选资源             --resource 显式，或自动挑含 RIGOL 的
+2. 选资源             --resource 显式，或自动挑含 RIGOL 的（探测失败的资源会关会话，
+                     不会在同一台设备上叠两个 VISA 会话；探测走同一套 --timeout/--chunk）
 3. 前端配置           可选 :AUT(+*OPC? 等待) → :TIM:SCAL → :{ch}:COUP → :{ch}:SCAL → :{ch}:OFFS
                      每项写完都回读实际生效值（SCPI 写入会被仪器按档位取整）
+                     **--capture 与 --measure 两条路径都做这一步**，且只写用户显式给的那些项
 4. 采集配置           :WAV:SOUR/:WAV:FORM BYTE/:WAV:MODE NORM  (+RAW 时 :ACQ:MDEP/:WAV:STAR/:WAV:STOP)
 5. 采集               :RUN → 等 --settle（默认 0.8s）；RAW 时再 :STOP（深内存只能在停止态读）
 6. 前导+抓取          :WAV:YREF?/YINC?/YOR? + :WAV:XINC?/XOR? → :WAV:DATA? 用 read_raw（二进制）→ parse_tmc_block
@@ -194,6 +206,7 @@ DS2302A 上误差是**恒定 −0.080%**（P1 的 28777.0 = 5755.4×5 精确成�
 3. 定位        CSV 在 U 盘根目录（如 999.CSV，大小数百 KB）
 4. 解析        --parse-ds100 <file.csv> --plot <png>
 5. 输出        采样率/探头倍率（自动提取）+ 频率/周期/占空比/幅值 + 波形图
+              **看 rc 与 warnings**：rc=2 表示波形是平线或周期数不足，不是"成功"
 ```
 
 DS100 CSV 为**原始采样电压值**。脚本弹性解析：自动跳过 header 行、自动提取 header 里的
@@ -221,22 +234,29 @@ DS100 CSV 为**原始采样电压值**。脚本弹性解析：自动跳过 heade
 4b. **`--settle`（默认 0.8 s）**：改时基/档位后立刻 `:WAV:DATA?` 会抓到旧帧，这是"同一命令两次结果不同"的常见来源。时基很慢（>0.5 s/div）时手动加大。
 5. **`:WAV:XOR?` 可能返回两个值**（`xorig,xref`），脚本取第一个。
 6. **电压还原公式**：`V = (code − YREF − YOR) × YINC`，由 `:WAV:YREF?/YINC?/YOR?` 实测前导式给出，**不要写死中心 128 / 每格 25 LSB**。实测 DS1074Z（fw 00.04.02.SP3）上 `YREF = 127`（不是 128）、`YINC = vdiv/25`（1 V/div 时 0.04），且 **`YOR` 的单位是码值不是伏特**（`YOR = 25 × OFFS`）。三种偏置下该式与仪器自报的 VMIN/VPP **完全一致**：OFFS=0 → `(135−127−0)×0.04 = 0.32 V`；OFFS=+1 → `(160−127−25)×0.04 = 0.32 V`；OFFS=−1 → `(110−127+25)×0.04 = 0.32 V`，读数不随偏置漂移。旧公式 `(val−128)/25*vdiv+voffs` 在 OFFS=0 时偏低 1 个码值，且把 `voffs` 加在解码公式里而不是写进仪器，偏置越大错得越多。
-6b. **仪器状态是持久的**：换 `:SCAL` 时 DS1000Z 会**按比例缩放残留 `:OFFS`**（实测 0.5→1 V/div 把 −2.41 V 变成 −4.82 V）。上一次跑留下的偏置会悄悄改变下一次的结果，甚至把 3.3 V 信号整体推出屏幕。脚本在给了 `--vdiv` 而未给 `--voffs` 时主动把 `:OFFS` 归零。
+6b. **离线 `--parse-tmc` 必须走同一个公式**：离线没有仪器可问前导三元组，老代码直接退回 `pre=None` 的旧式 `(code−128)/25*vdiv+voffs`——同一份 TMC 块在离线解析里会比真机**低 1 个码值**（1 V/div 时 0.04 V），而且离线路径没有任何参数能把它掰回来。现在缺省就是两族实测值（`--yref 127` / `--yinc vdiv÷25` / `--yor 25×--voffs`），`--yref/--yinc/--yor` 可显式覆盖（解析别的机型/别人给的块时才需要）。
+6c. **仪器状态是持久的**：换 `:SCAL` 时 DS1000Z 会**按比例缩放残留 `:OFFS`**（实测 0.5→1 V/div 把 −2.41 V 变成 −4.82 V）。上一次跑留下的偏置会悄悄改变下一次的结果，甚至把 3.3 V 信号整体推出屏幕。脚本在给了 `--vdiv` 而未给 `--voffs` 时主动把 `:OFFS` 归零。
 7. **USB 直连需驱动**：Windows 用 Zadig 给设备装 WinUSB（配 pyvisa-py），或装 NI-VISA 用系统后端（`--backend` 留空）。**脚本默认系统 VISA 优先**——装了 NI-VISA/RIGOL IVI 时直接识别 USB 设备，无需 Zadig。
 8. **测不出的测量项：`rise` / `fall` 在两族都不可用**。DS1074Z fw 00.04.02.SP3 与 DS2302A fw 00.03.06 上 `RISE` / `RISetime` / `FALL` / `FALLtime` **全都不被识别**，而两台对不认识的助记符**既不报错也不回复**——主机只能阻塞到超时。这是个静默陷阱：`--measure` 会白等到超时才返回 N/A。脚本已把 `rise`/`fall` 移出默认名单，显式请求时直接报"该机型不支持"并建议改用采样域测量或 `pwidth`/`pduty` 推算。
    同理 `PERI` 超时而 `PERIod` 正常——助记符必须用长名。`PSLEWrate` 在 DS1074Z 可用，**DS2302A 上不可用**。
 8b. **无有效测量时仪器返回哨兵值 `9.9E37`**，脚本按"无数据"处理成 `null` 并让 rc=2，不会把它当成一个数。
 8c. **`:MEAS:ITEM?` 查询失败要重试**：刚改完前端（`:SCAL`/`:COUP`）时仪器可能不回答，重试 3 次即可，别把一次超时当成命令不存在。脚本每次查询失败后都会 **drain 读缓冲**——超时不等于不会回，迟到回复会占住缓冲让后续每次读取错位一格（实测 `:CHAN1:OFFS?` 因此读到了 `:CHAN1:COUP?` 的 `'DC'`，直接抛 `could not convert string to float: 'DC'`）。
+     **这条对所有探测性查询都成立**，不只测量项：短超时的通道探测（`channel_exists`）、横向格数探测（`probe_hdiv`）、前导三元组回读（`read_preamble`）三条失败路径以前都漏了 drain，而它们恰恰是最常超时的——探测超时是**预期结果**，不是异常。
+8f. **探测失败的资源必须关会话**：`find_rigol` 遍历资源挑 RIGOL 时，老代码在 `*IDN?` 失败的分支直接 `continue`，会话就这么挂着；紧接着再开一个，同一台设备上叠两个 VISA 会话（USB-TMC 上表现为偶发 `Unexpected MsgID`）。现在失败路径也 `close()`，且探测走**同一套** `--timeout/--chunk`——老实现用写死的 1500 ms/32 B 占位值，用户为慢链路调大 `--timeout` 之后探测照样按 1.5 s 判死，一台其实能通上话的仪器被跳过。
 8d. **长命令用 `*OPC?` 等，不要轮询**：`*OPC?` 在两台都可用且真的会等（DS1074Z 上 `:AUT` 后 6.9 s 才回 `'1'`，DS2302A 上 1.59 s），之后缓冲是干净的。轮询 `:TIM:SCAL?` 会攒下 6 个迟到回复，AUT 结束后一次性涌入，此后每次读取都错位一格。
 8e. **`:SYST:ERR?` 只有 DS2000A 能用，但它能把"超时"变成确定诊断**：DS2302A 上查询失败后读 `:SYST:ERR?` 得到 `-113,"Undefined header; keyword cannot be found"`，直接证明该命令节点不存在；DS1000Z 上这条不回。脚本按 600 ms 短超时探一次并缓存，只在该命令可用时才用它补充错误原因。
 9. **两族坐标系统实测相同**（原先标注的"DS2000A 需复核"已撤销）：`YREF=127`、`YINC=vdiv/25`（1/0.5/0.2 V/div 三档比值都是 1.0000）、`YOR=25×OFFS`（码值）。DS2302A 上 `:MEAS:VMIN?/VMAX?/VPP?` 与 `(code−YREF−YOR)×YINC` 解码的比值**恰好 1.000**（1 / 2 / 0.5 / 0.2 / 0.15 V/div 五档都验过）。
 9b. **探头档位会被仪器的 `:PROB?` 掩盖**：实测踩过——探头**物理档位在 10×**，而 `:CHAN1:PROB?` 仍回 1，于是一个 3.48 V 的 3.3 V 逻辑高电平被读成 **0.35 V**，输出里没有任何字段能看出问题。脚本现在回读并输出 `probe` 字段（人类可读行显示 `PROB×1`），且当 Vpp < 0.6 V 且 `:PROB?`=1 时给出"核对探头 1×/10× 开关"的警告。切换物理档位后实测 3.48 V，与预期一致。
      **该警告有门限，不是"小信号就报"**：只在该波形**本来够高**时触发（`25×Vpp/vdiv ≥ FLAT_CODE_SPAN`，即至少占 8 个码值）。依据是被 10× 压过的 3.3 V 逻辑信号在 1 V/div 上仍占约 8 个码值，而真正的微小纹波只占几个码值——后者是"信号本来就小"，那是平线警告的活。实测还原后的固件 PC10 只有 0.16 V 纹波（码值跨度 4），两条警告曾同时出现且探头那条是错的，加门限后只剩正确的平线警告。
 9c. **时间类测量失败往往不是"超量程"而是"幅度太小"**：实测 DS2302A 上 0.35 Vpp 打在 1 V/div（纵向仅 0.35 格）时 `:MEAS:VPP?` 正常回数，而 `FREQ`/`PDUTy`/`PWIDth` **全部回 9.9E37 哨兵**；降到 0.5 V/div 就都正常。脚本的哨兵提示已列出这个成因，并在"时间类测量为 null 而 VPP 正常"时直接算纵向占比、给出建议的 `--vdiv`（让波形占 3 格左右）。
+9d. **`--measure` 单独用时，前端参数以前是死参数**：`--vdiv`/`--voffs`/`--coupling`/`--timebase`/`--autoset` 只在 `--capture` 路径生效，纯测量路径一个都没写进仪器——而工具自己给的提示还让人"把 `--vdiv` 调小再测"，那条建议在纯测量路径上根本执行不了。现在两条路径共用同一段 `configure_frontend`。它**只写用户显式给的项**，缺省全是查询，所以不会偷偷改仪器状态；`--vdiv` 给定而未给 `--voffs` 时仍会把 `:OFFS` 归零（理由同 6b）。
 
 15. **测量命令形式按机型探测，不要写死**：DS1000Z 用 `:MEAS:ITEM? <item>,<ch>`，DS2000A **没有 `:MEAS:ITEM` 这个节点**（`-113 Undefined header`），只有直查形式 `:MEAS:<item>? <ch>`。两族形式互斥且都不报错，所以脚本按 `*IDN?` 给初步猜测，再用 600 ms 短超时发一次 VPP 查询**实测确认**，不对就换另一种——猜错只多花一次 0.6 s 超时，不会产出错数字。探测结果在进程内缓存，每次运行只探一次。
 16. **上升沿间隔不均匀时频率无意义**：跨度法（首末上升沿÷周期数）隐含"信号等周期"这个前提。跨相位切换、突发、含毛刺的窗口会给出一个**看似自信的假频率**——实测 DS2302A 深内存 700 µs 窗口跨过信号发生器相位切换点时，上升沿间隔从 2 到 288 个采样点不等，仍算出 "7674 Hz" 这种没有意义的值。
     脚本现在算上升沿间隔的**变异系数**（std/mean），超过 `0.15` 就置 `sample_domain.irregular=true` 并警告 `freq_hz`/`duty_pct` 只是窗口平均值。阈值依据：真机 42 个相位样本实测 cv 最大 0.0279（P1，周期只有 34.7 个采样点，量化占比最大），有 5 倍余量；合成波形里跨相位切换是 0.82、2 采样点窄毛刺是 0.18，都被挡住。**边沿少于 3 个时该判据不适用**，此时由 `window-mean` 占空比警告覆盖。
+
+17. **`--json` 的 stdout 里只有那一份 JSON**：人类可读行（`▶` 型号、`⚠️` 警告、`✅` 产物路径）全部改道 **stderr**，`json.loads(stdout)` 直接可用。老实现把两者都写进 stdout，JSON 解析必然失败——调用方只能靠"从第一个 `{` 开始截"这类脆办法。自己写调用代码时不要再假设输出是混合的。
+18. **`--dry-run` 打的就是真实调用序列**：RAW 的 `:STOP` 时机、`:ACQ:MDEP` 回读后再夹 `:WAV:STOP`、前端配置、RAW 期间的 chunk/超时调整，全部与 `do_capture` 实际执行的一致。老版本的"计划"少了 `:STOP`、顺序也对不上，照着它核对代码会得出"代码没做这件事"的错误结论。改动执行路径时**必须同步改计划**，否则 `--dry-run` 会变成假证据。
 
 **DS100 专属**：
 10. **无 SCPI / 无 PC 软件**：不能 `--capture`/`--measure` 实时控制，只能 `--parse-ds100` 解析 U 盘 CSV。
@@ -261,6 +281,11 @@ DS100 CSV 为**原始采样电压值**。脚本弹性解析：自动跳过 heade
 | `--measure` 某项返回 null | 仪器回了 `9.9E37` 哨兵值＝该项当前测不出 | 看 `warnings`；确认 `--coupling DC`、信号在屏幕内 |
 | `--measure` 全部项都超时 | 测量命令形式不对（DS2000A 无 `:MEAS:ITEM`） | 脚本自动探测，见注意事项 15；错误队列里的 `-113` 是确诊依据 |
 | `--channel CHAN3` 报 `VI_ERROR_TMO` | 该机型没有这个通道（DS2000A 只有 2 通道）；写 `:CHAN3:SCAL` 不报错，要到后面查询才超时 | 脚本已前置探测并给出明确报错（CHAN1/2 不额外往返，CHAN3/4 才探）|
+| `--channel CHANX` 报 `invalid literal for int()` | 通道名拼错，老代码直接 `int()` 抛异常 | 脚本已改为报 `通道名无法识别：'CHANX'（形如 CHAN1 / CHAN2）`，rc=1 |
+| `--measure --vdiv 0.5` 好像没生效 | 老版本纯测量路径不写前端，`--vdiv` 等全是死参数 | 已修复，两条路径共用同一段前端配置；`--dry-run --measure ...` 能直接看到 `:CHANx:SCAL` 那几行 |
+| `json.loads(stdout)` 失败 | 人类可读行与 JSON 混在 stdout | 已修复：`--json` 时人类行走 stderr，见注意事项 17 |
+| `--parse-tmc` 的电压比真机低 0.04 V | 离线走了 `YREF=128` 的旧公式 | 已修复：缺省即 `127 / vdiv÷25 / 25×voffs`，见注意事项 6b；必要时 `--yref/--yinc/--yor` 覆盖 |
+| DS100 平线文件也报"成功" | 老版本 DS100 路径永远 rc=0 | 已修复：平线/周期数不足 → rc=2 + warnings，字段与实时路径一致 |
 | 超时后紧接着的 `:SYST:ERR?` 也超时一次 | 主机侧超时会让仪器把 `-410,"Query INTERRUPTED"` 排进错误队列，排空前读不到真实条目 | 再读一次即可；脚本探测后显式 drain，且**不缓存"不支持"的结论**（一次抖动不足以定性）|
 | 时间类测量全 null 但 vpp 正常 | 幅度相对 V/div 太小，纵向占比不足 | 调小 `--vdiv` 让波形占 3 格左右（见注意事项 9c） |
 | 读到的电压比预期小一个数量级 | 探头物理档位在 10× 而 `:PROB?` 仍是 1 | 核对探头 1×/10× 开关；输出里的 `probe` 字段能看出来 |
@@ -278,4 +303,11 @@ DS100 CSV 为**原始采样电压值**。脚本弹性解析：自动跳过 heade
 - `~/.claude/skills/EA-SKILL/tools/instrument/scripts/scope.py` - 工具脚本
 - `~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py` - 依赖探测
 - `~/.claude/skills/EA-SKILL/tools/instrument/requirements.txt` - 依赖清单
+- `~/.claude/skills/EA-SKILL/tests/test_scope.py` - **无硬件回归测试**（20 条，假仪器替身，覆盖上面各条注意事项）
 - `commands/la.md` - 逻辑分析仪命令（同类仪器）
+
+改动本命令后至少跑一次：
+
+```bash
+py -u ~/.claude/skills/EA-SKILL/tests/test_scope.py    # 不接仪器的回归
+```
