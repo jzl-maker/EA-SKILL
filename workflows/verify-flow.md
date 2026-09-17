@@ -30,7 +30,7 @@
 ## ① 编译（build-keil）
 
 ```bash
-python ~/.claude/skills/EA-SKILL/tools/build-keil/scripts/keil_builder.py \
+python <SKILL>/tools/build-keil/scripts/keil_builder.py \
   --project <工程文件路径> \
   --target <目标名> \
   --log <STATE_DIR>/logs/build_S<N>.log
@@ -50,14 +50,14 @@ python ~/.claude/skills/EA-SKILL/tools/build-keil/scripts/keil_builder.py \
 
 ```bash
 # 后端 A：OpenOCD（默认）
-python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py --detect
-python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py \
+python <SKILL>/tools/flash-openocd/scripts/openocd_flasher.py --detect
+python <SKILL>/tools/flash-openocd/scripts/openocd_flasher.py \
   --artifact <产物路径> \
   --interface <stlink|cmsis-dap> \
   --target <target/xxx.cfg>
 
 # 后端 B：J-Link 原生（自带独立回读校验；.bin 需 --base-address）
-python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py \
+python <SKILL>/tools/flash-openocd/scripts/openocd_flasher.py \
   --backend jlink-native \
   --artifact <产物路径> \
   --device <芯片型号>
@@ -76,16 +76,16 @@ python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py 
 
 ```bash
 # 读寄存器：确认 PC 进入用户区（main），SP 合法
-py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --regs
+py <SKILL>/tools/jlink-debug/scripts/jlink_debug.py --regs
 
 # 抓 RTT 启动日志（先 start 再复位，避免错过启动消息）
-py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --rtt start --log .ea/logs/rtt.log
+py <SKILL>/tools/jlink-debug/scripts/jlink_debug.py --rtt start --log .ea/logs/rtt.log
 # → 触发复位 → 
-py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --rtt stop --log .ea/logs/rtt.log
-py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --rtt show --log .ea/logs/rtt.log --tail 50
+py <SKILL>/tools/jlink-debug/scripts/jlink_debug.py --rtt stop --log .ea/logs/rtt.log
+py <SKILL>/tools/jlink-debug/scripts/jlink_debug.py --rtt show --log .ea/logs/rtt.log --tail 50
 
 # 必要时读固件区内存比对
-py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --mem 0x08000000 --count 8
+py <SKILL>/tools/jlink-debug/scripts/jlink_debug.py --mem 0x08000000 --count 8
 ```
 
 判定：
@@ -100,7 +100,7 @@ py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --mem 0x08
 ## ④ 串口（serial-monitor）—— 无串口时降级为 RTT
 
 ```bash
-python ~/.claude/skills/EA-SKILL/tools/serial-monitor/scripts/serial_monitor.py \
+python <SKILL>/tools/serial-monitor/scripts/serial_monitor.py \
   --port COM5 --baud 115200 --duration 15 \
   --wait-reset --auto-reset \
   --interface <同上> \
@@ -119,7 +119,7 @@ python ~/.claude/skills/EA-SKILL/tools/serial-monitor/scripts/serial_monitor.py 
 
 ```bash
 # 用 RTT 代偿串口日志（含复位前的历史，见 commands/debug.md）
-py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py \
+py <SKILL>/tools/jlink-debug/scripts/jlink_debug.py \
   --rtt snapshot --reset-run --out .ea/logs/rtt_S<N>.log
 ```
 

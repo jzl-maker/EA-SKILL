@@ -6,7 +6,7 @@
 ## 调用方式
 
 ```bash
-python ~/.claude/skills/EA-SKILL/tools/build-keil/scripts/keil_builder.py \
+python <SKILL>/tools/build-keil/scripts/keil_builder.py \
   --project <工程文件> \
   --target <目标名> \
   --log <STATE_DIR>/logs/build_S<N>.log
@@ -91,6 +91,6 @@ AI 按以下顺序连续执行：
 - ❌ 源文件中文乱码 / missing closing quote → 源文件被误转成 UTF-8，从备份恢复并保持 GBK 编码
 
 ## 相关文件
-- `~/.claude/skills/EA-SKILL/tools/build-keil/scripts/keil_builder.py` - 编译脚本
+- `<SKILL>/tools/build-keil/scripts/keil_builder.py` - 编译脚本
 - `commands/flash.md` - 烧录说明
 - `commands/serial.md` - 串口监控说明

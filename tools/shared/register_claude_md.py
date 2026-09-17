@@ -62,9 +62,22 @@ def _split_section(text: str) -> tuple[str, str, str]:
     return text[:start], text[start:after_start], text[after_start:]
 
 
+def _render(template: Path) -> str:
+    """读模板，并把 <SKILL> 换成真实安装路径。
+
+    模板里写 <SKILL> 是为了让 skill 装到哪都能用（见 SKILL.md「路径约定」）；
+    但写进 CLAUDE.md 的必须是可以直接执行的绝对路径，所以在落地时替换掉。
+    """
+    text = template.read_text(encoding="utf-8")
+    root = _skill_root(template.parent)
+    if root is not None:
+        text = text.replace("<SKILL>", root.as_posix())
+    return text
+
+
 def register(target: Path, template: Path) -> str:
     """幂等写入。返回状态：created | appended | skipped | updated。"""
-    snippet = template.read_text(encoding="utf-8")
+    snippet = _render(template)
 
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)

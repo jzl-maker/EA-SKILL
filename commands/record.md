@@ -13,11 +13,11 @@
 1. **【状态目录】** `get_state_dir()` → `<STATE_DIR>`
 2. **【改动清单】** 先跑 git 可用性检查，再决定用哪条路：
    ```bash
-   python ~/.claude/skills/EA-SKILL/tools/shared/git_state.py --root <工程目录> --scope-only
+   python <SKILL>/tools/shared/git_state.py --root <工程目录> --scope-only
    ```
    - **退出 0** → `git status` + `git diff`（仓库根=工程目录且有提交，可放心用）
    - **退出 1/2** → 用基线比对：
-     `python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --check --diff`
+     `python <SKILL>/tools/shared/project_guard.py --check --diff`
 
    ⚠️ **不要跳过这一步直接 `git diff --stat`**：仓库没有提交、或仓库根是工程的父目录时，
    它都返回 0 却输出为空 —— 空 diff 会被当成"本次没改东西"，记录直接失真。非 git 工程

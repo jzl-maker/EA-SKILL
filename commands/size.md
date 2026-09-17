@@ -17,7 +17,7 @@
 ## 调用方式
 
 ```bash
-py ~/.claude/skills/EA-SKILL/tools/resource/scripts/size_tool.py --project <工程目录>
+py <SKILL>/tools/resource/scripts/size_tool.py --project <工程目录>
 # 自动扫描工程下最新 .map → 输出 Flash/RAM 使用率 + 栈/堆 + 预警
 
 # 显式指定 .map（编译产物在 Listings/ 或 build/ 下）
@@ -84,6 +84,6 @@ py .../size_tool.py --map build/xxx.map --json
 | Flash/RAM 使用率 100%+ | 链接脚本容量小于实际用量 | 检查 .sct 区域 Max 是否过小；`--flash-kb` 覆盖 |
 
 ## 相关文件
-- `~/.claude/skills/EA-SKILL/tools/resource/scripts/size_tool.py` - 工具脚本
-- `~/.claude/skills/EA-SKILL/tools/resource/scripts/map_parser.py` - 共享 .map 解析器
+- `<SKILL>/tools/resource/scripts/size_tool.py` - 工具脚本
+- `<SKILL>/tools/resource/scripts/map_parser.py` - 共享 .map 解析器
 - `commands/map.md` - 同源命令（/ea map，排行/分段/符号映射）

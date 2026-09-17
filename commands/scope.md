@@ -50,7 +50,7 @@ DS100 限制：**不支持 SCPI、无官方 PC 软件**，USB 仅作 U 盘（卷
 ## 调用方式
 
 ```bash
-py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/scope.py --detect
+py <SKILL>/tools/instrument/scripts/scope.py --detect
 # ✅ 确认 pyvisa 栈 / VISA 资源 / 设备
 
 py .../scope.py --list            # 列出所有 VISA 资源
@@ -363,15 +363,15 @@ DS100 CSV 为**原始采样电压值**。脚本弹性解析：自动跳过 heade
 | DS100 频率异常 | header 无采样率且未手动指定，误用 1us/点 | `--sample-rate` 提供真实采样率，或确认 header 含 `sampling rate` |
 
 ## 相关文件
-- `~/.claude/skills/EA-SKILL/tools/instrument/scripts/scope.py` - 工具脚本
-- `~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py` - 依赖探测
-- `~/.claude/skills/EA-SKILL/tools/instrument/requirements.txt` - 依赖清单
-- `~/.claude/skills/EA-SKILL/tests/test_scope.py` - **无硬件回归测试**（28 条，假仪器替身，覆盖上面各条注意事项）
-- `~/.claude/skills/EA-SKILL/tools/instrument/scripts/common.py` - 公共层（`emit_json` / `diagnostics_to_stderr` 的 `--json` 契约）
+- `<SKILL>/tools/instrument/scripts/scope.py` - 工具脚本
+- `<SKILL>/tools/instrument/scripts/deps_check.py` - 依赖探测
+- `<SKILL>/tools/instrument/requirements.txt` - 依赖清单
+- `<SKILL>/tests/test_scope.py` - **无硬件回归测试**（28 条，假仪器替身，覆盖上面各条注意事项）
+- `<SKILL>/tools/instrument/scripts/common.py` - 公共层（`emit_json` / `diagnostics_to_stderr` 的 `--json` 契约）
 - `commands/la.md` - 逻辑分析仪命令（同类仪器，共用上面的 `--json` 机制）
 
 改动本命令后至少跑一次：
 
 ```bash
-py -u ~/.claude/skills/EA-SKILL/tests/test_scope.py    # 不接仪器的回归
+py -u <SKILL>/tests/test_scope.py    # 不接仪器的回归
 ```

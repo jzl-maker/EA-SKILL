@@ -11,6 +11,33 @@ version: 1.2.0
 
 你接收到的参数：`$ARGUMENTS`
 
+## 路径约定（重要）
+
+命令文档里的 `<SKILL>` 指**本 skill 的安装根目录**——也就是你正在读的 `SKILL.md`
+所在的那个目录。执行任何命令前，先把它换成真实绝对路径。
+
+```
+<SKILL> = 本 SKILL.md 所在目录
+```
+
+例：本文档装在 `D:\tools\EA-SKILL`，则文档里的
+
+```
+py <SKILL>/tools/shared/detect_tools.py --detect
+```
+
+要执行成
+
+```
+py D:/tools/EA-SKILL/tools/shared/detect_tools.py --detect
+```
+
+**不要照抄 `<SKILL>` 字面量去跑**（`<` `>` 在 shell 里是重定向符号）。
+同理，文档里的 `<STATE_DIR>` 指工程的状态目录（`.ea/` 优先，`.em/` 兼容老项目）。
+
+> 为什么要这样：skill 可能被装到 `~/.claude/skills/`、`.cursor/skills/`、`.trae/skills/`
+> 或任意目录，写死路径会让命令在别的安装位置全部失效。
+
 ## 快速开始
 
 ```

@@ -69,9 +69,9 @@ python EA-SKILL/tools/shared/detect_tools.py
 
 ```bash
 # 探测依赖与后端（Logic 2 软件 / 端口 / VISA 资源）
-py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py --detect
+py <SKILL>/tools/instrument/scripts/deps_check.py --detect
 # 缺 pip 包时安装（重依赖，确认后执行）
-py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py --install
+py <SKILL>/tools/instrument/scripts/deps_check.py --install
 ```
 
 - **pip 依赖**：`logic2-automation` / `pyvisa` / `pyvisa-py` / `numpy` / `matplotlib`
@@ -85,9 +85,9 @@ py ~/.claude/skills/EA-SKILL/tools/instrument/scripts/deps_check.py --install
 
 ```bash
 # 探测（DOCX/XLSX 恒为就绪）
-py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/deps_check.py --detect
+py <SKILL>/tools/doc-reader/scripts/deps_check.py --detect
 # 装 pdfplumber（PDF 解析需要）
-py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/deps_check.py --install
+py <SKILL>/tools/doc-reader/scripts/deps_check.py --install
 ```
 
 - **pip 依赖**：`pdfplumber`（仅 PDF）

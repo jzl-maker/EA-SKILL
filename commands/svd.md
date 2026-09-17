@@ -17,7 +17,7 @@
 ## 调用方式
 
 ```bash
-py ~/.claude/skills/EA-SKILL/tools/svd/scripts/svd_tool.py --detect
+py <SKILL>/tools/svd/scripts/svd_tool.py --detect
 # → 发现 59 个 SVD（N32G4FR、STM32F4x1 等），用 --chip 匹配
 
 # ① 外设下所有寄存器（门牌号）
@@ -90,6 +90,6 @@ py .../svd_tool.py --chip N32G4FR --reg RCC CR --json
 | 寄存器名不符 | 大小写/别名（如 RCC 的 CR/CR1）| `--find` 模糊搜索确认准确名 |
 
 ## 相关文件
-- `~/.claude/skills/EA-SKILL/tools/svd/scripts/svd_tool.py` - SVD 解析工具
+- `<SKILL>/tools/svd/scripts/svd_tool.py` - SVD 解析工具
 - `commands/debug.md` - 读寄存器/内存的 J-Link/OpenOCD 后端
 - `commands/map.md` - 符号/地址映射（函数/变量地址）

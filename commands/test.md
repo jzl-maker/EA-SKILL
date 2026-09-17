@@ -50,7 +50,7 @@
 ### 调用方式
 ```bash
 # 生成（不编译）
-python ~/.claude/skills/EA-SKILL/tools/test-runner/scripts/test_gen.py unit <目标.c>
+python <SKILL>/tools/test-runner/scripts/test_gen.py unit <目标.c>
 # 产物: <STATE_DIR>/tests/unit/<name>.c + <name>.md
 
 # 补全骨架后再编译运行（示例：头文件目录 + 被测源一并给上）

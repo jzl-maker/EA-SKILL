@@ -23,7 +23,7 @@
 ## 调用方式
 
 ```bash
-BJ="py ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py"
+BJ="py <SKILL>/tools/jlink-debug/scripts/jlink_debug.py"
 
 # ① 探测工具链（确认 JLink/RTTLogger/GDBServer 是否可用）
 $BJ --detect
@@ -345,7 +345,7 @@ $BJ --resolve <本工程符号名>
 涉及修改工程 `.c`/`.h` 时：本类 Keil 工程源文件为 **GB2312（GBK）** 编码。读取用 `encoding="gbk"`，修改用字节级 Python 操作，禁止 UTF-8 编辑器直接改中文（会整文件乱码）。详见 `build.md` 的编码章节。
 
 ## 相关文件
-- `~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py` - 调试工具脚本
+- `<SKILL>/tools/jlink-debug/scripts/jlink_debug.py` - 调试工具脚本
 - `commands/build.md` - 编译说明
 - `commands/flash.md` - 烧录说明
 - `commands/serial.md` - 串口监控说明

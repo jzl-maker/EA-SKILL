@@ -26,12 +26,12 @@
 
    ⚠️ **任一环因环境不可达时，先走降级路径，不要直接判"验证失败"** —— 那报的是
    "环境没配好"，却看起来像"代码有问题"。降级事实与**未被覆盖的验证项**都要写进 HVR。
-5. **【保护区/增量审计】** `python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --check`
+5. **【保护区/增量审计】** `python <SKILL>/tools/shared/project_guard.py --check`
    - 与 context.md 基线比对：保护区文件有改动且无 approve 记录 → **告警并阻塞验证**
    - 输出改动清单 + **保护区 diff**（供用户确认；关键源文件的 diff 加 `--diff`）
 6. **【git 可用性前置检查】**（要用 git 出 diff 时**必须先跑**）
    ```bash
-   python ~/.claude/skills/EA-SKILL/tools/shared/git_state.py --root <工程目录>
+   python <SKILL>/tools/shared/git_state.py --root <工程目录>
    ```
    - 退出 0 → `git diff` 可用，继续按 git 流程
    - 退出 1/2 → **不要**再拿 `git diff --stat` 当改动清单：它会返回空输出，

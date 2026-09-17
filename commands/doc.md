@@ -24,12 +24,12 @@
 
 1. **【依赖检查】** 首次运行前确认 `pdfplumber`（PDF 需要；DOCX/XLSX 零依赖）：
    ```bash
-   py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/deps_check.py --detect
+   py <SKILL>/tools/doc-reader/scripts/deps_check.py --detect
    ```
 2. **【路径确认】** 确认目标文件存在、扩展名受支持
 3. **【调用工具】**
    ```bash
-   py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/doc_reader.py <路径> [参数]
+   py <SKILL>/tools/doc-reader/scripts/doc_reader.py <路径> [参数]
    ```
 4. **【解读】** 按用户意图消费结果（见下方「串联场景」）
 
@@ -129,9 +129,9 @@
 
 ```bash
 # 探测
-py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/deps_check.py --detect
+py <SKILL>/tools/doc-reader/scripts/deps_check.py --detect
 # 安装（仅 pdfplumber；DOCX/XLSX 无需安装）
-py ~/.claude/skills/EA-SKILL/tools/doc-reader/scripts/deps_check.py --install
+py <SKILL>/tools/doc-reader/scripts/deps_check.py --install
 ```
 
 ## 相关文件

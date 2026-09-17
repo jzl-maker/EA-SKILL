@@ -1,118 +1,332 @@
 # EA-SKILL 使用说明
 
-嵌入式 AI 开发管家 —— 面向单片机/嵌入式工程（Keil/CubeMX/ESP-IDF/PlatformIO/Arduino）的 AI 辅助开发工具。让 Claude Code 直接接管"编译、烧录、串口监控、调试、寄存器查询、固件资源分析"等环节。
+让 AI 直接接管单片机的编译、烧录、串口、调试、查寄存器、看波形。
+你说要什么，它敲命令、读数据、给结论。
 
-## 系统要求
+---
 
-| 项 | 要求 |
-|----|------|
-| 操作系统 | Windows 10/11（工具链基于 Windows） |
-| Claude Code | 已安装（CLI / VSCode 扩展） |
-| Python | 3.9+，**用 `py` 启动器**（`python` 可能是 Store 假别名） |
-| Keil MDK | 编译必需（`uv4`），SVD 寄存器地图自动从 Pack 目录发现 |
-| OpenOCD | 烧录（ST-Link/CMSIS-DAP 通道）必需（`/ea setup` 可自动下载 xpack 版）；**J-Link 探针走原生通道，不需要它** |
-| J-Link（可选） | RTT 日志 / 断点 / 源码级调试 / **原生烧录（`--backend jlink-native`，含独立回读校验）** |
-| ST-Link / DAP-Link（可选） | OpenOCD 后端免断点内存监控 |
+## 20 个命令
+
+| 命令 | 用途 | 要硬件 |
+|------|------|--------|
+| `/ea setup` | 环境初始化 | — |
+| `/ea init` | 新建空工程 | — |
+| `/ea si` | 接入已有工程（代码审计） | — |
+| `/ea rec` | 恢复项目上下文（只读） | — |
+| `/ea new` | 新功能开发（含需求澄清） | — |
+| `/ea doc` | PDF / Word / Excel 解析 | — |
+| `/ea test` | 生成 unit / board 测试 | — |
+| `/ea build` | Keil 编译（成功后自动接烧录） | — |
+| `/ea flash` | 烧录（OpenOCD / J-Link 双通道） | 探针 |
+| `/ea serial` | 串口监控 | USB 转串口 |
+| `/ea debug` | RTT / 断点 / 内存 / 寄存器 | J-Link 或 ST-Link/DAP |
+| `/ea svd` | SVD 寄存器地图（`--read` 需硬件） | 部分 |
+| `/ea la` | Saleae 逻辑分析仪 | 分析仪（`--simulate` 无需） |
+| `/ea scope` | 示波器（Rigol / DS100 CSV） | Rigol 或 CSV 文件 |
+| `/ea size` | Flash / RAM 用量 + 超限预警 | — |
+| `/ea map` | .map 文件解析 | — |
+| `/ea verify` | 步骤验证（HVR + 保护区审计） | — |
+| `/ea record` | 输出修改记录 | — |
+| `/ea stat` | 状态查看 | — |
+| `/ea help` | 帮助 | — |
+
+> **`/ea xxx` 不是快捷命令，是口令。** AI 靠语义识别——你说「帮我烧录一下」和 `/ea flash` 等价。
+> 没有自动补全，别等提示。命令定义在 `commands/<命令>.md`，觉得哪步不对可以直接打开看或改。
+> 每个命令的完整参数：`/ea help <命令>`，或直接问 AI。
+
+---
 
 ## 安装
 
-```bash
-# 1. 把 skill 复制到 Claude 技能目录
-cp -r EA-SKILL ~/.claude/skills/EA-SKILL
+### 方式 A：从 GitHub 直装
 
-# 2. 运行环境初始化（注册工具路径 + 写入 CLAUDE.md 触发器）
+在 Claude Code 里说：
+
+```
+帮我安装 https://github.com/jzl-maker/EA-SKILL.git 这个 skill
+```
+
+AI 会克隆仓库、装到技能目录。
+
+### 方式 B：从压缩包安装
+
+**1.** 拿到 `EA-SKILL.zip`。仓库目录下自己打一个：
+
+```bash
+git archive -o EA-SKILL.zip HEAD
+```
+
+**2.** 在 Claude Code 里说：
+
+```
+帮我安装本地的 D:\EA-SKILL.zip，解压到 ~/.claude/skills/EA-SKILL
+```
+
+（路径按你的客户端换，见下面「装到哪个目录」。）
+
+### 装完都要跑一句初始化
+
+```
 /ea setup
 ```
 
-`/ea setup` 完成三件事：
-1. 追加脚本执行权限到 `~/.claude/settings.json`
-2. 探测并注册工具路径（OpenOCD / Keil UV4 / J-Link / Logic2）到 `%APPDATA%/ea_skill/config.json`
-3. 把「编译/烧录/串口/RTT/断点/SVD/需求分析/文档识别」等关键词 → 命令文档指针表写入 `~/.claude/CLAUDE.md`（动态按需加载，不污染常驻上下文）
+看到 5 步全 ✅ 就成了：
 
-## 命令表（20 个）
-
-| 命令 | 用途 |
-|------|------|
-| `/ea setup` | 环境/工具初始化（权限、工具路径、CLAUDE.md 触发器） |
-| `/ea init` | 新项目初始化（建 context 骨架 + 基线快照） |
-| `/ea si` | 存量项目接入（代码审计 + context + 基线快照） |
-| `/ea rec` | 恢复项目（state + context 摘要，只读） |
-| `/ea new` | 新功能开发（需求澄清 → 轻档/标准档，嵌入式硬件维度） |
-| `/ea doc` | 文档识别（PDF / Word / Excel → Markdown / JSON） |
-| `/ea test` | 生成测试用例 + 测试代码（unit / board） |
-| `/ea build` | Keil 编译 |
-| `/ea flash` | 烧录（OpenOCD / J-Link 原生双通道，后者含独立回读校验）|
-| `/ea serial` | 串口监控（CLI/MCP） |
-| `/ea debug` | 调试（J-Link RTT 取证/断点/内存/寄存器/复位放行；OpenOCD 免停机监控） |
-| `/ea svd` | SVD 寄存器地图（外设/位域/枚举 + 免断点读值） |
-| `/ea la` | Saleae 逻辑分析仪（抓取/协议解码） |
-| `/ea scope` | 示波器（Rigol SCPI 抓取/测量；正点原子 DS100 CSV 解析） |
-| `/ea size` | 固件资源分析（Flash/RAM/栈 + 超限预警） |
-| `/ea map` | Map 文件解析（对象排行/分段分布/符号映射） |
-| `/ea verify` | 步骤验证（HVR + 四连 + 保护区审计） |
-| `/ea record` | 输出修改记录（文件 + diff + 测试证据） |
-| `/ea stat` | 状态查看（默认极简，`-v` 全景） |
-| `/ea help` | 帮助 |
-
-## 快速上手
-
-一个典型调试闭环（AI 自主执行，你在旁边确认）：
-
-```bash
-# 1. 接入工程
-/ea si .                # 存量项目接入 → 生成 context.md + 基线快照
-
-# 2. 开发+验证
-/ea doc 需求规格.docx                      # 可选：先解析需求/引脚表/手册文档
-/ea new "增加一个 500ms 定时翻转 LED"      # 需求澄清 → 规划
-/ea new "加 CAN 上报" --plan-only          # 只做需求澄清+方案确认，不写代码
-/ea test unit ehtimer_tick                 # 纯函数单测
-/ea build                                  # Keil 编译
-/ea flash                                  # OpenOCD 烧录
-/ea serial --log .em/logs/uart.log         # 串口监控（另开终端抓日志）
-
-# 3. 调试（代码跑哪了 / 变量对不对 / 日志说了什么）
-#    ⚠️ 执行前先关闭 JLinkRTTViewer.exe —— 它会排空 RTT 缓冲，历史随即丢失，见「常见问题」
-/ea debug --rtt snapshot                   # RTT 取证：直读 RAM，含已发生的历史日志
-/ea debug --reset-run                      # 复位+放行（配合人工按压测试）
-/ea debug --rtt snapshot --duration 420 --interval 5   # 测试过程中反复采样
-#    ↑ snapshot 读走即推进 RdOff（读走即消费，要留存加 --out）；不推进会因缓冲
-#      写满而丢日志，BLOCKING 模式下还会把目标锁死。要纯只读加 --no-consume
-/ea debug --mem _TimeCount_10ms --no-halt --watch 5    # 变量采样且不打断目标
-/ea debug --bp Display_BootDoraemon --run-ms 2000      # 断点定位
-/ea svd --chip N32G4FR --read RCC CR       # 免断点读寄存器 + 位域解码
-/ea size --project .                       # Flash/RAM 用量 + 超限预警
-
-# 4. 记录
-/ea record s1                              # 输出修改记录
+```
+🔧 EA-SKILL 环境初始化
+[1/5] 更新权限配置...   ✅
+[2/5] 探测工具...       ✅
+[3/5] 注册工具路径...   ✅
+[4/5] 检查 OpenOCD...   ✅
+[5/5] 注册 CLAUDE.md 触发器...   ✅
 ```
 
-## 真机验证记录
+`/ea setup` 干五件事：探测工具路径（OpenOCD / Keil UV4 / J-Link）、缺 OpenOCD 就自动下载、写权限配置、把命令索引写进 `~/.claude/CLAUDE.md`。
 
-| 能力 | 硬件 | 状态 |
-|------|------|------|
-| `/ea flash` 烧录 | ST-Link / DAP（OpenOCD 通道） | ✅ 已验证 |
-| `/ea flash --backend jlink-native` | N32G4FR + J-Link（实机烧录 106KB）| ✅ 已验证——J-Link 自报 `Verification failed`，独立回读 3 次一致且 md5 与产物相同，**裁定为 J-Link 误报**（烧录实际成功）。回归用例 F1–F11 |
-| `/ea scope` 波形抓取/测量 | Rigol DS1074Z | ✅ 已验证（Vpp/频率/周期/占空比） |
-| `/ea scope` CSV 解析 | 正点原子 DS100 | ✅ 已验证（自动提取采样率/探头倍率） |
-| `/ea svd` 寄存器地图 | N32G4FR（Keil Pack SVD） | ✅ 已验证（derivedFrom 继承/位域/枚举） |
-| `/ea debug` OpenOCD 免断点 | 待 ST-Link/DAP 实机 | ⏳ 待验证 |
-| `/ea debug --rtt snapshot` | N32G4FR + J-Link | ⏳ 方法已实机验证（savebin 直读）；工具封装待实机复跑 |
+> **第 5 步是 `/ea` 生效的关键**——它建立「编译/烧录/串口/RTT/断点/SVD/需求/文档」关键词 → 命令文档的指针表。没这步 AI 不知道「烧录」该去读哪个文件。
 
-## 常见问题
+### 装到哪个目录
 
-| 问题 | 解决 |
+**装到哪都行。** 命令文档里的脚本路径用的是 `<SKILL>` 占位符（指 skill 根目录），AI 执行前会自己换算成真实路径。
+
+| 你的客户端 | 默认技能目录 |
+|-----------|-------------|
+| Claude Code | `~/.claude/skills/` |
+| Cursor | `~/.cursor/skills/`，也兼容读 `~/.claude/skills/` |
+| Trae | `.trae/skills/`（工程内） |
+| 其它 | 该客户端文档里写的技能目录 |
+
+> ⚠️ **只有一件事仍依赖 Claude Code**：`/ea setup` 的第 1 步（写 `~/.claude/settings.json` 权限）和第 5 步（写 `~/.claude/CLAUDE.md` 触发器）是 Claude 的机制。
+> 在别的客户端里，这两步要换成该客户端的等价物——权限用它的黑名单配置，触发器用它的规则文件。
+> **`/ea setup` 的第 2~4 步（探测工具路径）跟客户端无关，照常可用。**
+
+---
+
+## 5 分钟上手
+
+### 1. 接入你的工程
+
+**在工程目录下**打开 Claude Code，敲：
+
+```
+/ea si .
+```
+
+它会扫出芯片型号、外设占用、模块结构、保护区清单，并在工程根建一个 `.ea/` 目录——**这是 AI 对这个工程的记忆**。
+
+以后新开对话，一句 `/ea rec` 就把上下文捞回来。
+
+> 空工程用 `/ea init <项目名>`，不要用 `si`。
+
+### 2. 编译 + 烧录
+
+```
+/ea build
+```
+
+编译成功后它**自动接着烧录、再抓串口日志**。你只管看板子。
+
+### ✅ 到这你就上手了
+
+---
+
+## 常用速查
+
+命令不用给参数——AI 会问你，或者自己从 `context.md` 里找。
+
+### 环境与项目
+
+| 我要… | 命令 | 也可以直接说 |
+|-------|------|-------------|
+| 装好 / 修好环境 | `/ea setup` | 初始化一下环境 |
+| 接入已有工程 | `/ea si` | 接入这个工程 |
+| 新建空工程 | `/ea init` | 新建一个工程叫 xxx |
+| 新对话里捞回上下文 | `/ea rec` | 继续上次的活儿 |
+| 我现在做到哪了 | `/ea stat` | 现在什么进度 |
+
+### 写代码
+
+| 我要… | 命令 | 也可以直接说 |
+|-------|------|-------------|
+| 加新功能 | `/ea new` | 加一个 500ms 定时翻转 LED |
+| 只要方案不动代码 | `/ea new` | 先给方案，别写代码 |
+| 解析 PDF / Word / Excel | `/ea doc` | 读一下这个数据手册 |
+| 生成单元测试 | `/ea test` | 给 drv_led.c 写单测 |
+| 生成板级测试用例 | `/ea test` | 给按键功能写板级用例 |
+| 验证这一步 | `/ea verify` | 验证 s5 |
+| 输出修改记录 | `/ea record` | 记录一下 s5 |
+
+### 构建、烧录、运行
+
+| 我要… | 命令 | 也可以直接说 |
+|-------|------|-------------|
+| 编译（**成功后自动接烧录**） | `/ea build` | 编译一下 |
+| 只编译不烧录 | `/ea build` | 编译，先别烧 |
+| 强制全量重编 | `/ea build` | 全量重编 |
+| 烧录 | `/ea flash` | 烧到板子上 |
+| 先看看探针在不在 | `/ea flash` | 看看探针连上没 |
+| 抓串口日志 | `/ea serial` | 抓一下串口日志 |
+| 抓复位后的完整启动日志 | `/ea serial` | 复位，抓完整启动日志 |
+
+### 调试
+
+| 我要… | 命令 | 也可以直接说 |
+|-------|------|-------------|
+| 看代码跑到哪了 | `/ea debug` | 看看 Display_Refresh 跑到没有 |
+| 读变量 | `/ea debug` | 看看 _TimeCount_10ms 现在多少 |
+| 监控变量**且不停 CPU** | `/ea debug` | 不停机盯着 _TimeCount_10ms |
+| 抓 RTT **历史**日志 | `/ea debug` | 抓一下 RTT 日志 |
+| 复位并放行（配合人工测试） | `/ea debug` | 复位然后放行，我来按按键 |
+| 读 CPU 寄存器 | `/ea debug` | 看看 CPU 寄存器 |
+| 未知符号名先查一下 | `/ea debug` | 查一下含 LED 的符号 |
+| 源码级调试 | `/ea debug` | 起 gdb 调试 |
+
+### 寄存器与仪器
+
+| 我要… | 命令 | 也可以直接说 |
+|-------|------|-------------|
+| 列出可用 SVD | `/ea svd` | 有哪些 SVD |
+| 看外设有哪些寄存器 | `/ea svd` | 看看 GPIOA 有哪些寄存器 |
+| 看寄存器的位域定义 | `/ea svd` | 查一下 RCC 的 CR 寄存器 |
+| 读寄存器当前值（不停机） | `/ea svd` | 读一下 RCC 的 CR |
+| 模糊搜寄存器名 | `/ea svd` | 搜一下含 HSE 的寄存器 |
+| 示波器抓波形 | `/ea scope` | 抓一下 CHAN1 的波形 |
+| 示波器测量 | `/ea scope` | 测一下 CHAN1 的频率和占空比 |
+| 逻辑分析仪抓取 | `/ea la` | 抓一下 0~3 通道 |
+| 逻辑分析仪 + 解码 | `/ea la` | 抓一下 I2C，SCL 在 3 号脚 |
+| 无硬件试一下 | `/ea la` | 用模拟设备跑一遍 |
+
+### 资源分析
+
+| 我要… | 命令 | 也可以直接说 |
+|-------|------|-------------|
+| Flash / RAM 用量 | `/ea size` | 看看 Flash 用了多少 |
+| 谁占了内存 | `/ea map` | 谁占内存最多 |
+| 查符号地址 | `/ea map` | 查一下 __initial_sp 的地址 |
+| 栈/堆详情 | `/ea map` | 看看栈多大 |
+
+### 通用
+
+**任何命令加 `--dry-run` 都只打印计划、不真跑。**
+
+`--json` 给 AI 读（`svd` / `la` / `scope` / `size` / `map` / `doc` 支持）——你在终端里手跑别加，人类可读输出更友好。
+
+---
+
+## 六个必须知道的坑
+
+**1. `/ea xxx` 是口令，不是命令。**
+见开头「20 个命令」下的说明。记住一点就够：**说人话一样管用**。
+
+**2. AI 有 6 条红线，但只有一条是硬拦。**
+保护区禁改（`startup_*.s` / 链接脚本 / `system_*.c`）、老工程只做增量、改动必给 diff、动手前先读 context、Keil 的 `.c`/`.h` 是 GB2312、**AI 只提议 commit 不 push**。
+
+> Claude Code 里 `rm` / `sudo` / `git push` 被 `~/.claude/settings.json` **硬拦**；
+> **换到 Cursor / Trae / Copilot 就没有这层了**，得在那个客户端里自己配黑名单。
+
+**3. J-Link 一次只能一个进程连。**
+`JLinkRTTViewer` / `JLinkRTTLogger` / `JLinkGDBServerCL` / Keil 调试会话都会独占探针。
+**被占用时的现象和「探针没插」一模一样**——连不上先排查占用。
+
+> 例外：RTTViewer 和 Keil 同时开着**不阻止烧录**。别把烧录失败归因到它头上。
+
+**4. Windows 装了 SEGGER 驱动，OpenOCD 就用不了 J-Link 探针。**
+报 `LIBUSB_ERROR_NOT_SUPPORTED` + `No J-Link device found`。硬约束，`transport select swd` 也救不了。
+让 AI 换 J-Link 原生通道就行。
+
+**5. `--mem` 默认 halt CPU，抓 RTT 默认写目标 RAM。**
+人工按按键的测试要让它**不停机**（前提是固件冻结了看门狗 IWDG）。
+抓 RTT 是「读走即消费」，同一段历史只能读一次——**要留存必须让它落盘**。
+
+**6. 增量编译不打印固件大小，这是正常的。**
+Keil 没重新链接就不输出 `Program Size:`，字段缺席不代表编译有问题。要拿大小用 `/ea size`。
+
+---
+
+## 排错
+
+### 命令不生效
+
+| 现象 | 解决 |
 |------|------|
-| `python` 命令不可用 | 用 `py`（Windows Python launcher） |
-| 中文输出乱码 | 脚本已内置 UTF-8 reconfigure；命令行直跑加 `PYTHONIOENCODING=utf-8` |
-| 找不到 OpenOCD/J-Link | 运行 `/ea setup` 注册工具路径 |
-| Keil 源码中文乱码 | 工程源文件为 GB2312 编码，禁止 UTF-8 编辑器直接改中文 |
-| 调试 halt 后复位 | 设备带 IWDG 看门狗，缩短 `--run-ms` 或用 OpenOCD 后端免断点读 |
-| **调试时 JLinkRTTViewer.exe 必须关闭** | 它会持续推进 `RdOff` 把环形缓冲排空，导致 `--rtt snapshot` 拿不到那段时间的历史。用 `/ea debug --rtt snapshot` 前先关掉它（`JLinkRTTLogger` / `JLinkRTTClient` / Keil 调试会话同理）。**注意：它并不阻止烧录**（实机验证：RTTViewer 与 Keil 同时开着，`/ea flash --backend jlink-native` 照常烧录成功），所以"烧录失败"别往这上面赖 |
-| 既要实时看 RTT 又要调试 | 让 `JLinkGDBServerCL -RTTTelnetPort 19021` 持有探针，RTTViewer 界面选 **"Existing Session"**（attach 模式，不占探针），gdb 连 2331 调试。**注意此时 `/ea debug` 的 `--bp/--mem/--rtt snapshot` 均不可用**——那套是给「探针空闲时事后取证」用的 |
+| 敲 `/ea xxx` 没反应 | 重跑 `/ea setup`，确认第 5 步 ✅ |
+| AI 说要先初始化 | 缺 `.ea/`，跑 `/ea init` 或 `/ea si .` |
+| AI 说已初始化但读不到状态 | 你在子目录里，切到工程根 |
+
+### 工具找不到
+
+| 现象 | 解决 |
+|------|------|
+| `python` 命令不可用 | 用 `py`（Windows 启动器，`python` 可能是 Store 假别名） |
+| 找不到 OpenOCD / J-Link / UV4 | 重跑 `/ea setup` 注册路径 |
+| 中文输出乱码 | 命令行直跑加 `PYTHONIOENCODING=utf-8` |
+| 某工程要用专用工具路径 | 在工作区放 `.ea_skill.json`，覆盖全局 `%APPDATA%/ea_skill/config.json`<br>`py tools/shared/tool_config.py list` 查当前配置 |
+
+### 烧录 / 调试失败
+
+| 现象 | 解决 |
+|------|------|
+| `LIBUSB_ERROR_NOT_SUPPORTED` + `No J-Link device found` | 见坑 4 |
+| `There already is an active connection` | 探针被占用，见坑 3 |
+| 连不上，现象和「探针没插」一样 | 同上。**先排查占用** |
+| J-Link 报 `Verification failed` | **多半是误报**——看独立回读：回读一致且 md5 与产物相同就是成功了 |
+| 刚烧完立刻回读拿到错位镜像 | 编程后需要时间收敛，让 AI 的 `--settle` 保持默认 10 秒，**别调 0** |
+| 串口打不开 | COM 口被占用，关掉串口助手 / 其它终端 |
+| 调试 halt 后设备复位了 | 有 IWDG 看门狗。缩短 halt 时间，或改用不停机模式 |
+| 抓 RTT 拿不到历史日志 | RTTViewer 把缓冲排空了，先关掉它 |
+| `地址无效：…不是 SEGGER_RTT_CB` | `_SEGGER_RTT` 符号地址不对，与探针无关 |
+
+### 其它
+
+| 现象 | 说明 |
+|------|------|
+| `git diff` 是空的但确实改了代码 | 仓库无提交、或仓库根是工程的父目录时，`git diff` 会**静默返回空**。AI 会用基线比对兜底 |
+| Keil 源码中文变乱码 | 工程是 GB2312 被 UTF-8 编辑器转了。**不可逆**，改动前先备份 |
+| 示波器数和面板对不上 | 采样域和仪器 `:MEAS?` 是两套算法，采样域更准（实测 28800Hz → 采样域 +0.01% / 仪器 −0.79%） |
+
+---
+
+## 可选依赖
+
+不用就不装。
+
+| 你要用的功能 | 需要什么 |
+|-------------|---------|
+| `/ea build` `/ea size` `/ea map` | Keil MDK |
+| `/ea flash`（ST-Link/DAP）、免断点调试 | OpenOCD（`/ea setup` 可自动下载） |
+| `/ea flash`（J-Link）、`/ea debug` | J-Link + SEGGER 驱动。**不需要 OpenOCD** |
+| `/ea doc` 解析 PDF | `py -m pip install pdfplumber`（**DOCX / XLSX 零依赖**） |
+| `/ea la` | Saleae Logic 2 软件 + `py -m pip install logic2-automation` |
+| `/ea scope`（Rigol） | `py -m pip install pyvisa pyvisa-py numpy`；USB 直连需 WinUSB 驱动（Zadig）或 NI-VISA |
+| `/ea scope` 解析 DS100 CSV | **什么都不用装** |
+| `/ea serial` | `py -m pip install pyserial` |
+
+> 仪器可以先不装——`/ea la --simulate`（Logic 2 模拟设备）和 `/ea scope --parse-tmc`（合成波形）能无硬件跑通全流程。
+
+---
+
+## 已验证状态
+
+**已实机验证**：烧录（ST-Link / J-Link 原生）、示波器抓取测量（Rigol DS1074Z / DS2302A / DS100 CSV）、SVD 寄存器地图（N32G4FR）、回归测试 199 条全绿。
+
+**待验证**：`/ea debug` OpenOCD 免断点通道。
+
+**跑回归测试**（不需要任何硬件）：
+
+```bash
+cd tests && for t in test_*.py; do py "$t" || echo "!! $t FAILED"; done
+```
+
+---
 
 ## 开发
 
-- 源码在 `tools/<name>/scripts/*.py` + `commands/<cmd>.md`
-- 修改后部署：`cp -r EA-SKILL/. ~/.claude/skills/EA-SKILL/`，用 `diff -rq` 验证
-- 新增命令流程：写脚本 → 写命令文档 → 更新 `SKILL.md` 命令表 → 更新触发器模板 → 部署
+源码在 `tools/<name>/scripts/*.py` + `commands/<cmd>.md`。
+
+```bash
+# 改完部署到技能目录
+cp -r EA-SKILL/. ~/.claude/skills/EA-SKILL/
+diff -rq EA-SKILL ~/.claude/skills/EA-SKILL    # 验证一致
+```
+
+**新增命令流程**：写脚本 → 写 `commands/<cmd>.md` → 更新 `SKILL.md` 命令表 → 更新 `templates/claude-md-snippet.md` → 部署 → 重跑 `/ea setup`。

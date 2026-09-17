@@ -47,8 +47,18 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 elif sys.stderr:
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-GUARD_HINT = ("python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py "
-              "--check --diff")
+# 从脚本自身位置推算 skill 根目录，而不是写死安装路径 ——
+# 这个提示会打印给 AI 照着执行，装到哪就得指向哪。
+# tools/shared/git_state.py → parents[2] = <SKILL>
+_SKILL_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _guard_hint() -> str:
+    guard = (_SKILL_ROOT / "tools" / "shared" / "project_guard.py").as_posix()
+    return f"python {guard} --check --diff"
+
+
+GUARD_HINT = _guard_hint()
 
 
 def _git(root: Path, *args: str) -> tuple[int, str]:

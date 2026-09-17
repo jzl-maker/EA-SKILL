@@ -12,10 +12,10 @@
 
 ```bash
 # OpenOCD 通道
-python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py --detect
+python <SKILL>/tools/flash-openocd/scripts/openocd_flasher.py --detect
 
 # J-Link 通道（确认 JLink.exe 在位）
-python ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --detect
+python <SKILL>/tools/jlink-debug/scripts/jlink_debug.py --detect
 ```
 
 ## 调用方式
@@ -23,7 +23,7 @@ python ~/.claude/skills/EA-SKILL/tools/jlink-debug/scripts/jlink_debug.py --dete
 **OpenOCD 通道**（ST-Link / CMSIS-DAP / DAPLink）：
 
 ```bash
-python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py \
+python <SKILL>/tools/flash-openocd/scripts/openocd_flasher.py \
   --artifact <产物路径> \
   --interface stlink \
   --target target/stm32f4x.cfg
@@ -32,13 +32,13 @@ python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py 
 **J-Link 原生通道**（`--backend jlink-native`，烧录后**独立回读比对**）：
 
 ```bash
-python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py \
+python <SKILL>/tools/flash-openocd/scripts/openocd_flasher.py \
   --backend jlink-native \
   --artifact build/app.hex \
   --device N32G4FRRE
 
 # 只回读校验（不烧），或看将要执行什么
-python ~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py \
+python <SKILL>/tools/flash-openocd/scripts/openocd_flasher.py \
   --backend jlink-native --artifact build/app.hex --verify-only
 ```
 
@@ -150,7 +150,7 @@ Error: No J-Link device found
 > `commands/debug.md` 的「不要和 JLinkRTTViewer 同时开」。
 
 ## 相关文件
-- `~/.claude/skills/EA-SKILL/tools/flash-openocd/scripts/openocd_flasher.py` — 烧录入口（两条通道）
-- `~/.claude/skills/EA-SKILL/tools/flash-jlink/scripts/jlink_flasher.py` — J-Link 原生后端（回读校验）
+- `<SKILL>/tools/flash-openocd/scripts/openocd_flasher.py` — 烧录入口（两条通道）
+- `<SKILL>/tools/flash-jlink/scripts/jlink_flasher.py` — J-Link 原生后端（回读校验）
 - `commands/build.md` — 编译说明
 - `commands/serial.md` — 串口监控说明

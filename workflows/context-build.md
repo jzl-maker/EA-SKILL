@@ -68,7 +68,7 @@
    - 调试接口（LED GPIO、按键 GPIO、调试串口）
 5. **既有约定**：编码检测（GB2312 vs UTF-8 采样）、文件命名、宏定义风格
 6. **保护区清单**：登记 `startup_*.s` / `system_*.c` / 链接脚本 / 向量表文件
-7. **基线快照**：`python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --snapshot` → 哈希写入 context
+7. **基线快照**：`python <SKILL>/tools/shared/project_guard.py --snapshot` → 哈希写入 context
 8. **写 context.md** 到 `<STATE_DIR>/context.md`
 
    ⚠️ **必须保留 `<!-- summary:begin -->` / `<!-- summary:end -->` 标记**（包住

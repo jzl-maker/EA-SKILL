@@ -21,7 +21,7 @@
    - **既有约定**：编码（GB2312 检测）、命名规范、架构约束
    - **保护区清单**：`startup_*.s`、向量表、`*.sct`/`*.ld`/`*.icf`、`system_*.c`
    - 全部写入 `<STATE_DIR>/context.md`
-4. **【基线快照】** `python ~/.claude/skills/EA-SKILL/tools/shared/project_guard.py --snapshot`
+4. **【基线快照】** `python <SKILL>/tools/shared/project_guard.py --snapshot`
    - 保护区 + 关键源文件 SHA-256 → context.md 基线区
    - **老工程保护从此生效**：之后任何改动都能 diff / 审计
 5. **【git 检查】** `git log -1` 读最后一次提交信息写入 state.md

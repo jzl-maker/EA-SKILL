@@ -115,8 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--project", help="工程目录（扫描最新 .map）")
     parser.add_argument("--flash-kb", type=int, help="Flash 容量 KB（缺省用链接脚本 region Max）")
     parser.add_argument("--ram-kb", type=int, help="RAM 容量 KB（缺省用链接脚本 region Max）")
-    parser.add_argument("--warn", type=float, default=90, help="预警阈值 %（默认 90）")
-    parser.add_argument("--err", type=float, default=95, help="超限阈值 %（默认 95）")
+    # help 串里的百分号要写 %%：argparse 会对 help 做 `help % params`，
+    # 裸 `%` 后跟全角括号会抛 ValueError: unsupported format character（`--help` 直接崩）
+    parser.add_argument("--warn", type=float, default=90, help="预警阈值 %%（默认 90）")
+    parser.add_argument("--err", type=float, default=95, help="超限阈值 %%（默认 95）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     parser.add_argument("--dry-run", action="store_true", help="只打印流程不解析")
     return parser
